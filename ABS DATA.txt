@@ -1,0 +1,2373 @@
+model::>>
+
+
+class PromoCode(models.Model):
+    DISCOUNT_FLAT = "flat"
+    DISCOUNT_PERCENT = "percent"
+    DISCOUNT_TYPE_CHOICES = [
+        (DISCOUNT_FLAT, "Flat"),
+        (DISCOUNT_PERCENT, "Percent"),
+    ]
+
+    code = models.CharField(max_length=50, unique=True)
+    razorpay_offer_id = models.CharField(max_length=100, unique=True)
+    discount_type = models.CharField(max_length=10, choices=DISCOUNT_TYPE_CHOICES)
+    discount_value = models.DecimalField(max_digits=10, decimal_places=2)
+    max_discount_amount = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    minimum_order_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    max_uses_total = models.PositiveIntegerField(blank=True, null=True)
+    max_uses_per_user = models.PositiveIntegerField(default=1)
+    valid_from = models.DateTimeField(blank=True, null=True)
+    valid_until = models.DateTimeField(blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["code"]
+
+    def __str__(self):
+        return self.code
+
+    def is_available_now(self):
+        now = timezone.now()
+        if not self.is_active:
+            return False, "Promo code is inactive."
+        if self.valid_from and now < self.valid_from:
+            return False, "Promo code is not active yet."
+        if self.valid_until and now > self.valid_until:
+            return False, "Promo code has expired."
+        if self.max_uses_total and self.usages.count() >= self.max_uses_total:
+            return False, "Promo code usage limit is over."
+        return True, ""
+
+
+class PromoCodeUsage(models.Model):
+    promo_code = models.ForeignKey(PromoCode, related_name="usages", on_delete=models.PROTECT)
+    profile = models.ForeignKey(UserProfile, related_name="promo_usages", on_delete=models.CASCADE)
+    razorpay_offer_id = models.CharField(max_length=100)
+    razorpay_order_id = models.CharField(max_length=100)
+    razorpay_payment_id = models.CharField(max_length=100, unique=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    used_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-used_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["promo_code", "profile"],
+                name="unique_promo_code_per_profile",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.profile} - {self.promo_code}"
+
+
+
+
+admin::>>
+
+
+@admin.register(PromoCode)
+class PromoCodeAdmin(admin.ModelAdmin):
+    list_display = (
+        "code",
+        "razorpay_offer_id",
+        "discount_type",
+        "discount_value",
+        "max_uses_per_user",
+        "is_active",
+    )
+    search_fields = ("code", "razorpay_offer_id")
+    list_filter = ("discount_type", "is_active")
+
+
+@admin.register(PromoCodeUsage)
+class PromoCodeUsageAdmin(admin.ModelAdmin):
+    list_display = (
+        "promo_code",
+        "profile",
+        "razorpay_offer_id",
+        "razorpay_order_id",
+        "razorpay_payment_id",
+        "used_at",
+    )
+    search_fields = (
+        "promo_code__code",
+        "profile__full_name",
+        "razorpay_offer_id",
+        "razorpay_order_id",
+        "razorpay_payment_id",
+    )
+    list_filter = ("promo_code", "used_at")
+    readonly_fields = ("used_at",)
+
+
+
+
+
+
+
+
+views::>>
+
+from django.shortcuts import render, redirect, get_object_or_404
+from django.views.decorators.csrf import csrf_exempt
+from .models import *
+from django.http import HttpResponse
+from django.contrib import messages
+from .models import *
+from .whatsapp_api import send_whatsapp_message
+
+
+from django.db import IntegrityError
+from decimal import Decimal
+from itertools import zip_longest
+import random
+from django.http import JsonResponse
+
+from datetime import timedelta
+from .whatsapp_auth_api import send_auth_message
+from django.http import HttpResponseForbidden
+
+from django.utils import timezone
+
+
+
+
+
+
+def clean_int_id(value):
+    value = str(value or "").strip()
+    return value if value.isdigit() else None
+
+
+def find_profile_from_request(request, profile_id=None):
+    profile_id = clean_int_id(profile_id)
+    if profile_id:
+        profile = UserProfile.objects.filter(id=profile_id).first()
+        if profile:
+            return profile
+
+    for session_key in ("current_profile_id", "latest_profile_id"):
+        session_profile_id = clean_int_id(request.session.get(session_key))
+        if session_profile_id:
+            profile = UserProfile.objects.filter(id=session_profile_id).first()
+            if profile:
+                return profile
+
+    public_username = (request.POST.get("public_username") or request.GET.get("public_username") or "").strip()
+    if public_username:
+        profile = UserProfile.objects.filter(public_username=public_username).first()
+        if profile:
+            return profile
+
+    phone = (request.POST.get("contct_num") or request.GET.get("contct_num") or "").strip()
+    if phone:
+        profile = UserProfile.objects.filter(phone=phone).order_by("-id").first()
+        if profile:
+            return profile
+
+    return UserProfile.objects.filter(payment_status=False).order_by("-id").first()
+
+
+
+
+
+# ---------------------------
+# FRONT PAGE
+# ---------------------------
+
+
+
+def frontpage(request):
+    profile = UserProfile.objects.last()  # get latest card
+    return render(request, 'frontpage.html', {
+        'profile': profile
+    })
+
+###############srikanth changes ###########################
+def indexss(request):
+    return render(request,'indexs.html')
+
+
+
+
+
+
+# @csrf_exempt
+# def create_card(request):
+
+#     context = {}
+
+#     if request.method == "POST":
+#         step = request.POST.get("step")
+
+#         # ---------------- STEP 1 ----------------
+#         if step == "1":
+#             full_name=request.POST.get("name")
+#             public_username=request.POST.get("public_username")
+#             phone=request.POST.get("contct_num")
+#             if UserProfile.objects.filter(public_username=public_username).exists():
+#                 messages.error(request,'Public Url already exists!..')
+#                 return render(request, "nk_appform.html", context)
+#             # elif UserProfile.objects.filter(full_name=full_name).exists():
+#             #     messages.error(request,'Full name already exists!..')
+#             #     return render(request, "nk_appform.html", context)
+#             elif UserProfile.objects.filter(phone=phone).exists():
+#                 messages.error(request,'Phone already exists!..')
+#                 return render(request, "nk_appform.html", context)
+#             else:
+
+            
+            
+
+#                 try:
+#                     profile = UserProfile.objects.create(
+#                         full_name=full_name,
+#                         public_username=public_username,
+#                         phone=phone,
+#                         phone2=request.POST.get("contct_num2", "").strip(),
+#                         title=request.POST.get("designation", "").strip(),
+#                         email=request.POST.get("email_Id", "").strip(),
+#                         address=request.POST.get("address", "").strip(),
+
+#                         personal_insta_url=request.POST.get("personal_insta_url", "").strip(),
+#                         personal_facebook_url=request.POST.get("personal_fac_url", "").strip(),
+#                         personal_linked_url=request.POST.get("personal_linked_url", "").strip(),
+#                         personal_twitter_url=request.POST.get("personal_twitter_url", "").strip(),
+
+#                         avatar=request.FILES.get("photo"),
+#                         banner=request.FILES.get("banner"),
+#                     )
+
+#                 except IntegrityError:
+
+#                     username = request.POST.get("public_username")
+#                     profile = UserProfile.objects.filter(public_username=username).first()
+
+#                     if profile and profile.payment_status:
+#                         return redirect(f"/card/{profile.public_username}/")
+
+#                     context.update({
+#                         "profile": profile,
+#                         "active_step": 2,
+#                         # "info": "Username exists. Continuing with your profile."
+#                     })
+#                     messages.error(request,'Username already exists!..Go to MyCard!.')
+#                     return render(request, "nk_appform.html", context)
+
+#                 context.update({
+#                     "profile": profile,
+#                     "active_step": 2,
+#                     # "success": "Step 1 saved successfully!"
+#                 })
+#                 messages.success(request,"Step 1 saved successfully!")
+#                 return render(request, "nk_appform.html", context)
+
+#         # ---------------- STEP 2 ----------------
+#         elif step == "2":
+
+#             profile_id = request.POST.get("profile_id")
+#             youtube = request.POST.get('youtube')
+#             pinterest = request.POST.get('pinterest')
+#             company_logo = request.FILES.get('company_logo')
+
+#             if not profile_id:
+#                 context["error"] = "Complete Step 1 first."
+#                 context["active_step"] = 1
+#                 return render(request, "nk_appform.html", context)
+
+#             profile = get_object_or_404(UserProfile, id=profile_id)
+
+#             # Update company info
+#             profile.company = request.POST.get("companyname", "")
+#             profile.website = request.POST.get("website", "")
+#             profile.company_tagline1 = request.POST.get("companytagline1", "")
+#             profile.company_tagline2 = request.POST.get("companytagline2", "")
+#             profile.company_email = request.POST.get("company_email", "")
+#             profile.company_phone1 = request.POST.get("company_phone1", "")
+#             profile.company_phone2 = request.POST.get("company_phone2", "")
+#             profile.intro = request.POST.get("intro", "")
+
+#             # ----------- FIX: Save social URLs -----------
+#             profile.social_insta_url = request.POST.get("social_insta_url", "").strip() or request.POST.get("instagram", "").strip()
+#             profile.social_facebook_url = request.POST.get("social_facebook_url", "").strip() or request.POST.get("facebook", "").strip()
+#             profile.social_linked_url = request.POST.get("social_linked_url", "").strip() or request.POST.get("linkdin", "").strip()
+#             profile.social_twitter_url = request.POST.get("social_twitter_url", "").strip() or request.POST.get("twitter", "").strip()
+#             profile.social_youtube_url  = youtube
+#             profile.social_pinterest_url = pinterest
+#             if company_logo:
+#                 profile.company_logo=company_logo
+#             # ---------------------------------------------
+
+#             profile.save()
+
+#             # Branches
+#             profile.branches.all().delete()
+            
+            
+            
+            
+#             for name in request.POST.getlist("branch_name[]"):
+#                 if name.strip():
+#                     Branch.objects.create(profile=profile, name=name.strip())
+
+#             # Services
+#             titles = request.POST.getlist("servicetitle[]")
+#             taglines = request.POST.getlist("servicetagline[]")
+#             images = request.FILES.getlist("serviceimg[]")
+
+#             profile.services.all().delete()
+
+#             for t, d, img in zip_longest(titles, taglines, images, fillvalue=""):
+#                 if t.strip():
+#                     Service.objects.create(
+#                         profile=profile,
+#                         title=t.strip(),
+#                         description=d.strip(),
+#                         image=img
+#                     )
+
+#             # Social links table
+#             profile.social_links.all().delete()
+
+#             socials = {
+#                 "LinkedIn": request.POST.get("linkdin"),
+#                 "Instagram": request.POST.get("instagram"),
+#                 "Facebook": request.POST.get("facebook"),
+#                 "Twitter": request.POST.get("twitter"),
+#             }
+
+#             for platform, url in socials.items():
+#                 if url:
+#                     SocialLink.objects.create(
+#                         profile=profile,
+#                         platform=platform,
+#                         url=url
+#                     )
+
+#             context.update({
+#                 "profile": profile,
+#                 "active_step": 3,
+#                 # "success": "Step 2 saved successfully!"
+#             })
+#             messages.success(request,'Step 2 saved successfully!')
+
+#             return render(request, "nk_appform.html", context)
+
+#         # ---------------- STEP 3 (PAYMENT) ----------------
+#         elif step == "3":
+
+#             profile_id = request.POST.get("profile_id")
+#             profile = get_object_or_404(UserProfile, id=profile_id)
+#             payment_failed = request.POST.get("payment_failed")
+
+#             payment_id = request.POST.get("razorpay_payment_id")
+
+#             if payment_failed:
+#                 try:
+#                     name = profile.full_name
+#                     mobile = "91" + str(profile.phone)
+
+#                     data = {
+#                         "name": name,
+#                         "body": "payment failed. No worries. Please wait a while or contact our support team if your account has been debited. Otherwise, click on My CARD to finish your payment and access your NexoKard"
+#                     }
+
+#                     res = send_whatsapp_message(data, mobile, "nc_tem_pay")
+#                     print("WhatsApp failure response:", res)
+
+#                 except Exception as e:
+#                     print("WhatsApp Error:", e)
+
+#                 return render(request, "nk_appform.html", {
+#                     "profile": profile,
+#                     "active_step": 3,
+#                     "error": "Payment not completed!"
+#                 })
+
+
+
+
+
+
+#             # Save payment
+#             profile.razorpay_payment_id = payment_id
+#             profile.payment_status = True
+
+            
+#             profile.save()
+
+#                     # ✅ SEND WHATSAPP MESSAGE (ADD HERE)
+#             try:
+#                 name = profile.full_name
+#                 mobile = "91" + str(profile.phone)
+#                 url = profile.public_username
+
+#                 data = {
+#                     "name": name,
+#                     "body": f"Nexokard Link: http://nexokard.com/bc/{url}"
+#                 }
+
+#                 res = send_whatsapp_message(data, mobile, "nc_template1")
+#                 print("WhatsApp response:", res)
+
+#             except Exception as e:
+#                 print("WhatsApp Error:", e)
+
+#             # Store session for thankyou page
+#             request.session["latest_profile_id"] = profile.id
+
+#             return redirect("thankyou")
+
+#     # ---------------- GET REQUEST ----------------
+
+#     profile_id = request.GET.get("profile_id")
+
+#     if profile_id:
+#         profile = get_object_or_404(UserProfile, id=profile_id)
+
+#         if profile.payment_status:
+#             return redirect(f"/card/{profile.public_username}/")
+
+#         context["profile"] = profile
+#         context["active_step"] = 3 if profile.company else 2
+
+#         return render(request, "nk_appform.html", context)
+
+#     context["active_step"] = 1
+#     return render(request, "nk_appform.html", context)
+
+
+
+@csrf_exempt
+def create_card(request):
+
+    context = {}
+
+    if request.method == "POST":
+        step = request.POST.get("step")
+        posted_profile_id = clean_int_id(request.POST.get("profile_id"))
+        session_profile_id = clean_int_id(request.session.get("current_profile_id"))
+        latest_profile_id = clean_int_id(request.session.get("latest_profile_id"))
+        profile_id = posted_profile_id
+
+        # Handle Previous button first
+        if request.POST.get("btn-prev"):
+            profile_id = posted_profile_id or session_profile_id or latest_profile_id
+            profile = UserProfile.objects.filter(id=profile_id).first() if profile_id else None
+            print('max(int(step) - 1, 1): ', max(int(step) - 1, 1))
+            context.update({
+                "profile": profile,
+                "active_step": max(int(step) - 1, 1)
+            })
+            return render(request, "nk_appform.html", context)
+
+        # --- Step 1 Saving Logic ---
+        if step == "1":
+            full_name = request.POST.get("name")
+            public_username = request.POST.get("public_username")
+            phone = request.POST.get("contct_num")
+
+            profile = None
+            # Check if profile already exists
+            if profile_id:
+                profile = UserProfile.objects.filter(id=profile_id).first()
+
+            if not profile:  # Only create new if profile does not exist
+                if UserProfile.objects.filter(public_username=public_username).exists():
+                    messages.error(request, 'Public URL already exists!')
+                    return render(request, "nk_appform.html", context)
+                elif UserProfile.objects.filter(phone=phone).exists():
+                    messages.error(request, 'Phone already exists!')
+                    return render(request, "nk_appform.html", context)
+
+                profile = UserProfile.objects.create(
+                    full_name=full_name,
+                    public_username=public_username,
+                    phone=phone,
+                    phone2=request.POST.get("contct_num2", "").strip(),
+                    title=request.POST.get("designation", "").strip(),
+                    email=request.POST.get("email_Id", "").strip(),
+                    address=request.POST.get("address", "").strip(),
+                    personal_insta_url=request.POST.get("personal_insta_url", "").strip(),
+                    personal_facebook_url=request.POST.get("personal_fac_url", "").strip(),
+                    personal_linked_url=request.POST.get("personal_linked_url", "").strip(),
+                    personal_twitter_url=request.POST.get("personal_twitter_url", "").strip(),
+                    avatar=request.FILES.get("photo"),
+                    banner=request.FILES.get("banner"),
+                )
+            else:
+                # Update existing profile
+                profile.full_name = full_name
+                profile.phone = phone
+                profile.phone2 = request.POST.get("contct_num2", "").strip()
+                profile.title = request.POST.get("designation", "").strip()
+                profile.email = request.POST.get("email_Id", "").strip()
+                profile.address = request.POST.get("address", "").strip()
+                profile.personal_insta_url = request.POST.get("personal_insta_url", "").strip()
+                profile.personal_facebook_url = request.POST.get("personal_fac_url", "").strip()
+                profile.personal_linked_url = request.POST.get("personal_linked_url", "").strip()
+                profile.personal_twitter_url = request.POST.get("personal_twitter_url", "").strip()
+                if request.FILES.get("photo"):
+                    profile.avatar = request.FILES.get("photo")
+                if request.FILES.get("banner"):
+                    profile.banner = request.FILES.get("banner")
+                profile.save()
+
+            # After Save & Proceed → move to Step 2
+            context.update({
+                "profile": profile,
+                "active_step": 2
+            })
+            request.session["current_profile_id"] = profile.id
+            request.session["latest_profile_id"] = profile.id
+            messages.success(request, "Step 1 saved successfully!")
+            return render(request, "nk_appform.html", context)
+
+        # ---------------- STEP 2 ----------------
+        elif step == "2":
+
+            profile_id = posted_profile_id or session_profile_id or latest_profile_id
+            youtube = request.POST.get('youtube')
+            pinterest = request.POST.get('pinterest')
+            company_logo = request.FILES.get('company_logo')
+
+            if not profile_id:
+                context["error"] = "Complete Step 1 first."
+                context["active_step"] = 1
+                return render(request, "nk_appform.html", context)
+
+            profile = get_object_or_404(UserProfile, id=profile_id)
+
+            # Update company info
+            profile.company = request.POST.get("companyname", "")
+            profile.website = request.POST.get("website", "")
+            profile.company_tagline1 = request.POST.get("companytagline1", "")
+            profile.company_tagline2 = request.POST.get("companytagline2", "")
+            profile.company_email = request.POST.get("company_email", "")
+            profile.company_phone1 = request.POST.get("company_phone1", "")
+            profile.company_phone2 = request.POST.get("company_phone2", "")
+            profile.intro = request.POST.get("intro", "")
+
+            # ----------- FIX: Save social URLs -----------
+            profile.social_insta_url = request.POST.get("social_insta_url", "").strip() or request.POST.get("instagram", "").strip()
+            profile.social_facebook_url = request.POST.get("social_facebook_url", "").strip() or request.POST.get("facebook", "").strip()
+            profile.social_linked_url = request.POST.get("social_linked_url", "").strip() or request.POST.get("linkdin", "").strip()
+            profile.social_twitter_url = request.POST.get("social_twitter_url", "").strip() or request.POST.get("twitter", "").strip()
+            profile.social_youtube_url  = youtube
+            profile.social_pinterest_url = pinterest
+            if company_logo:
+                profile.company_logo=company_logo
+            # ---------------------------------------------
+
+            profile.save()
+            request.session["current_profile_id"] = profile.id
+            request.session["latest_profile_id"] = profile.id
+
+            # Branches
+            profile.branches.all().delete()
+            
+            
+            
+            
+            for name in request.POST.getlist("branch_name[]"):
+                if name.strip():
+                    Branch.objects.create(profile=profile, name=name.strip())
+
+            # Services
+            titles = request.POST.getlist("servicetitle[]")
+            taglines = request.POST.getlist("servicetagline[]")
+            images = request.FILES.getlist("serviceimg[]")
+
+            profile.services.all().delete()
+
+            for t, d, img in zip_longest(titles, taglines, images, fillvalue=""):
+                if t.strip():
+                    Service.objects.create(
+                        profile=profile,
+                        title=t.strip(),
+                        description=d.strip(),
+                        image=img
+                    )
+
+            # Social links table
+            profile.social_links.all().delete()
+
+            socials = {
+                "LinkedIn": request.POST.get("linkdin"),
+                "Instagram": request.POST.get("instagram"),
+                "Facebook": request.POST.get("facebook"),
+                "Twitter": request.POST.get("twitter"),
+            }
+
+            for platform, url in socials.items():
+                if url:
+                    SocialLink.objects.create(
+                        profile=profile,
+                        platform=platform,
+                        url=url
+                    )
+
+            context.update({
+                "profile": profile,
+                "active_step": 3,
+                # "success": "Step 2 saved successfully!"
+            })
+            messages.success(request,'Step 2 saved successfully!')
+
+            return render(request, "nk_appform.html", context)
+
+        # ---------------- STEP 3 (PAYMENT) ----------------
+        elif step == "3":
+
+            profile_id = posted_profile_id or session_profile_id or latest_profile_id
+            profile = find_profile_from_request(request, profile_id)
+            if not profile:
+                return render(request, "nk_appform.html", {
+                    "active_step": 1,
+                    "error": "Complete Step 1 first."
+                })
+
+            request.session["current_profile_id"] = profile.id
+            payment_failed = request.POST.get("payment_failed")
+
+            payment_id = request.POST.get("razorpay_payment_id")
+
+            if payment_failed:
+                try:
+                    name = profile.full_name
+                    mobile = "91" + str(profile.phone)
+
+                    data = {
+                        "name": name,
+                        "body": "payment failed. No worries. Please wait a while or contact our support team if your account has been debited. Otherwise, click on My CARD to finish your payment and access your NexoKard"
+                    }
+
+                    res = send_whatsapp_message(data, mobile, "nc_tem_pay")
+                    print("WhatsApp failure response:", res)
+
+                except Exception as e:
+                    print("WhatsApp Error:", e)
+
+                return render(request, "nk_appform.html", {
+                    "profile": profile,
+                    "active_step": 3,
+                    "error": "Payment not completed!"
+                })
+
+
+
+
+
+
+            # Save payment
+            profile.razorpay_payment_id = payment_id
+            profile.payment_status = True
+
+            
+            profile.save()
+
+                    # ✅ SEND WHATSAPP MESSAGE (ADD HERE)
+            try:
+                name = profile.full_name
+                mobile = "91" + str(profile.phone)
+                url = profile.public_username
+
+                data = {
+                    "name": name,
+                    "body": f"Nexokard Link: http://nexokard.com/bc/{url}"
+                }
+
+                res = send_whatsapp_message(data, mobile, "nc_template1")
+                print("WhatsApp response:", res)
+
+            except Exception as e:
+                print("WhatsApp Error:", e)
+
+            # Store session for thankyou page
+            request.session["latest_profile_id"] = profile.id
+            request.session.pop("current_profile_id", None)
+
+            return redirect("thankyou")
+
+    # ---------------- GET REQUEST ----------------
+
+    profile_id = clean_int_id(request.GET.get("profile_id"))
+
+    if profile_id:
+        print('profile_id: ', profile_id)
+        profile = get_object_or_404(UserProfile, id=profile_id)
+
+        if profile.payment_status:
+            return redirect(f"/card/{profile.public_username}/")
+
+        request.session["current_profile_id"] = profile.id
+        context["profile"] = profile
+        context["active_step"] = 3 if profile.company else 2
+
+        return render(request, "nk_appform.html", context)
+
+    context["active_step"] = 1
+    return render(request, "nk_appform.html", context)
+
+
+
+
+
+def business_card(request, public_username):
+    profile = get_object_or_404(UserProfile, public_username=public_username)
+
+    services = profile.services.all()
+    socials = profile.social_links.all()
+    branches = profile.branches.all()
+
+    return render(request, "nk_businesscard.html", {
+        "profile": profile,
+        "services": services,
+        "socials": socials,
+        "branches": branches,
+    })
+
+
+from django.shortcuts import render, get_object_or_404
+from .models import UserProfile
+
+def view_business_card(request, public_username):
+    profile = get_object_or_404(UserProfile, public_username=public_username)
+
+    services = profile.services.all()
+    socials = profile.social_links.all()
+    branches = profile.branches.all()
+
+    return render(request, "nk_view_businesscard.html", {
+        "profile": profile,
+        "services": services,
+        "socials": socials,
+        "branches": branches,
+    })
+
+
+#########################finall  srikanth##################
+
+
+@csrf_exempt
+def edit_card(request, pk):
+    profile = get_object_or_404(UserProfile, pk=pk)
+    services = Service.objects.filter(profile=profile)
+    # links = SocialLink.objects.filter(profile=profile)
+    if request.method == "POST":
+        youtube=request.POST.get('youtube')
+        pinterest=request.POST.get('pinterest')
+        company_logo=request.FILES.get('company_logo')
+
+        # ================================
+        # UPDATE PROFILE
+        # ================================
+        profile.public_username = request.POST.get("public_username") or profile.public_username
+        
+        profile.full_name = request.POST.get("fname")
+        profile.title = request.POST.get("designation")
+        profile.email = request.POST.get("email_Id")
+        profile.phone = request.POST.get("contact_number")
+        profile.phone2 = request.POST.get("contact_number2")
+        
+        profile.website = request.POST.get("websiteurl")
+
+        profile.address = request.POST.get("perm_address")
+
+        profile.company = request.POST.get("companyname")
+        profile.company_email = request.POST.get("companyemail")
+        profile.company_phone1 = request.POST.get("companycontactno")
+        profile.company_phone2 = request.POST.get("companycontactno2")
+        profile.intro = request.POST.get("introtext")
+        profile.company_tagline1 = request.POST.get("companytagline1")
+        profile.company_tagline2 = request.POST.get("companytagline2")
+        print("TAGLINE 1:", request.POST.get("companytagline1"))
+        print("TAGLINE 2:", request.POST.get("companytagline2"))
+        profile.personal_insta_url=request.POST.get('instagramurl')
+        profile.personal_fac_url=request.POST.get('facebookurl')
+        profile.personal_linked_url=request.POST.get('linkdinurl')
+        profile.personal_twitter_url=request.POST.get('twitterurl')
+
+        profile.company_insta_url=request.POST.get('s_instagramurl')
+        profile.social_facebook_url=request.POST.get('s_facebookurl')
+        profile.social_linked_url=request.POST.get('s_linkdinurl')
+        profile.company_twitter_url=request.POST.get('s_twitterurl')
+        profile.social_pinterest_url=pinterest
+        profile.social_youtube_url=youtube
+        if company_logo:
+            profile.company_logo=company_logo
+        
+        if request.FILES.get("banner_img"):
+            profile.banner = request.FILES.get("banner_img")
+
+
+        if request.FILES.get("photo"):
+            profile.avatar = request.FILES.get("photo")
+
+        profile.save()
+        # messages.success(request,)
+        # ================================
+        # UPDATE SOCIAL LINKS
+        # ================================
+        # SocialLink.objects.filter(profile=profile).delete()
+        # social_map = {
+        #     "LinkedIn": "linkdinurl",
+        #     "Instagram": "instagramurl",
+        #     "Facebook": "facebookurl",
+        #     "Twitter": "twitterurl",
+        # }
+        # for platform, field in social_map.items():
+        #     url = request.POST.get(field)
+        #     if url:
+        #         SocialLink.objects.create(profile=profile, platform=platform, url=url)
+
+        
+        # ================= EDIT SERVICES (UPDATE + CREATE) =================
+
+        titles = request.POST.getlist("servicetitle[]")
+        taglines = request.POST.getlist("servicetagline[]")
+        images = request.FILES.getlist("serviceimg[]")
+
+        existing_services = list(Service.objects.filter(profile=profile))
+
+        image_index = 0  # for uploaded images only
+
+        for i in range(len(titles)):
+            title = titles[i].strip()
+            tagline = taglines[i].strip() if i < len(taglines) else ""
+
+            if not title:
+                continue
+
+            # UPDATE EXISTING SERVICE
+            if i < len(existing_services):
+                service = existing_services[i]
+                service.title = title
+                service.description = tagline
+
+                if image_index < len(images):
+                    service.image = images[image_index]
+                    image_index += 1
+
+                service.save()
+
+            #  CREATE NEW SERVICE (from + button)
+            else:
+                image = None
+                if image_index < len(images):
+                    image = images[image_index]
+                    image_index += 1
+
+                Service.objects.create(
+                    profile=profile,
+                    title=title,
+                    description=tagline,
+                    image=image
+                )
+
+
+        # ================================
+        # UPDATE BRANCHES
+        # ================================
+       
+        Branch.objects.filter(profile=profile).delete()
+        branch_names = request.POST.getlist("branch_name[]")
+        for name in branch_names:
+            if name.strip():
+                Branch.objects.create(profile=profile, name=name)
+
+
+        # Redirect to the business card view
+        # return redirect("business_card", pk=profile.id)
+        return redirect(f'/card/{profile.public_username}/')
+        
+        
+    # ================================
+    #  GET REQUEST (LOAD EDIT PAGE)
+    # ================================
+    # socials = {s.platform: s.url for s in profile.social_links.all()}
+    services = profile.services.all()
+    branches = profile.branches.all()  # Make sure Branch model has related_name="branches"
+
+    return render(request, "nk_editcard.html", {
+        "card": profile,
+        "profile": profile,
+        "services": services,
+        # "socials": socials,
+        "branches": branches,
+    })          
+
+
+##########################srikanth######################
+
+# def business_card(request, pk):
+#     profile = get_object_or_404(UserProfile, pk=pk)
+
+#     # Fetch related data
+#     services = profile.services.all()
+#     socials = profile.social_links.all()
+#     branches = profile.branches.all()  
+
+#     return render(request, "businesscard.html", {
+#         "profile": profile,
+#         "services": services,
+#         "socials": socials,
+#         "branches": branches,  
+#     })
+    
+# ---------------------------
+# THANK YOU PAGE
+# ---------------------------
+
+def thankyou(request):
+    profile_id = request.session.get('latest_profile_id')
+    profile = None
+
+    if profile_id:
+        try:
+            profile = UserProfile.objects.get(pk=profile_id)
+        except UserProfile.DoesNotExist:
+            profile = None
+
+    return render(request, "nk_thankyou.html", {"profile": profile})
+
+
+
+
+
+
+
+# def generate_otp(request):
+#     if request.method == 'POST':
+#         mobile = request.POST.get('mobile_no')
+
+#         try:
+#             profile = UserProfile.objects.get(phone=mobile)
+#         except UserProfile.DoesNotExist:
+#             return JsonResponse({'status': False, 'message': 'Mobile not registered'})
+
+#         otp = random.randint(100000, 999999)
+
+#         profile.otp = str(otp)
+#         profile.otp_expiry = timezone.now() + timedelta(minutes=1)
+#         profile.save()
+
+#         send_auth_message(mobile, otp)
+
+#         request.session['otp_profile_id'] = profile.id
+#         request.session.set_expiry(300)  # 5 minutes
+        
+
+#         return JsonResponse({'status': True})
+
+
+# from django.http import JsonResponse
+# from django.utils import timezone
+
+# def verify_otp(request):
+#     if request.method != "POST":
+#         return JsonResponse({'status': False, 'message': 'Invalid request'}, status=400)
+
+#     otp = "".join([
+#         request.POST.get('otp1', ''),
+#         request.POST.get('otp2', ''),
+#         request.POST.get('otp3', ''),
+#         request.POST.get('otp4', ''),
+#         request.POST.get('otp5', ''),
+#         request.POST.get('otp6', ''),
+#     ])
+
+#     if len(otp) != 6:
+#         return JsonResponse({'status': False, 'message': 'Enter complete OTP'}, status=400)
+
+#     profile_id = request.session.get('otp_profile_id')
+
+#     if not profile_id:
+#         return JsonResponse({'status': False, 'message': 'Session expired'}, status=403)
+
+#     profile = UserProfile.objects.get(id=profile_id)
+
+#     if not profile.otp:
+#         return JsonResponse({'status': False, 'message': 'OTP not generated'}, status=400)
+
+#     if profile.otp != otp:
+#         return JsonResponse({'status': False, 'message': 'Invalid OTP'}, status=400)
+
+#     if timezone.now() > profile.otp_expiry:
+#         return JsonResponse({'status': False, 'message': 'OTP expired'}, status=400)
+    
+    
+#     profile.otp = None
+#     profile.otp_expiry = None
+#     profile.save()
+
+#     request.session['otp_verified'] = True
+#     print("OTP RECEIVED:", otp)
+#     print("OTP SAVED:", profile.otp)
+
+#     if profile.payment_status:
+        
+#         redirect_url = f"/card/{profile.public_username}/"
+#     else:
+        
+#         redirect_url = f"/create/?profile_id={profile.id}"
+
+#     return JsonResponse({
+#         'status': True,
+#         'redirect_url': f"/card/{profile.public_username}/"
+        
+
+#     })
+def verify_otp(request):
+    if request.method != "POST":
+        return JsonResponse({'status': False, 'message': 'Invalid request'}, status=400)
+
+    otp = "".join([
+        request.POST.get('otp1', ''),
+        request.POST.get('otp2', ''),
+        request.POST.get('otp3', ''),
+        request.POST.get('otp4', ''),
+        request.POST.get('otp5', ''),
+        request.POST.get('otp6', ''),
+    ])
+
+    if len(otp) != 6:
+        return JsonResponse({'status': False, 'message': 'Enter complete OTP'}, status=400)
+
+    profile_id = request.session.get('otp_profile_id')
+
+    if not profile_id:
+        return JsonResponse({'status': False, 'message': 'Session expired'}, status=403)
+
+    profile = UserProfile.objects.get(id=profile_id)
+
+    if not profile.otp:
+        return JsonResponse({'status': False, 'message': 'OTP not generated'}, status=400)
+
+    if profile.otp != otp:
+        return JsonResponse({'status': False, 'message': 'Invalid OTP'}, status=400)
+
+    if timezone.now() > profile.otp_expiry:
+        return JsonResponse({'status': False, 'message': 'OTP expired'}, status=400)
+    
+    
+    profile.otp = None
+    profile.otp_expiry = None
+    profile.save()
+
+    request.session['otp_verified'] = True
+    print("OTP RECEIVED:", otp)
+    print("OTP SAVED:", profile.otp)
+
+
+    # return JsonResponse({
+    #     'status': True,
+    #     'redirect_url': f"/card/{profile.public_username}/"
+    
+    if profile.payment_status:
+        redirect_url = f"/card/{profile.public_username}/"
+    else:
+        redirect_url = f"/create/?profile_id={profile.id}"
+
+    return JsonResponse({
+        'status': True,
+        'redirect_url': redirect_url
+})
+        
+
+
+def save_form(request):
+    mobile = request.session.get('otp_verified_mobile')
+
+    if not mobile:
+        return HttpResponseForbidden()
+
+    form = UserProfile.objects.get(mobile=mobile)
+
+
+
+    del request.session['otp_verified_mobile']
+
+    return redirect('/success')
+
+
+from django.conf import settings
+from django.http import JsonResponse
+from django.urls import reverse
+from django.views.decorators.csrf import csrf_exempt
+
+try:
+    import razorpay
+    from razorpay.errors import SignatureVerificationError
+except ImportError:
+    razorpay = None
+
+    class SignatureVerificationError(Exception):
+        pass
+
+
+# Razorpay client
+razorpay_client = None
+if razorpay:
+    razorpay_client = razorpay.Client(
+        auth=(settings.API_ID, settings.API_SECRET)
+    )
+
+
+def validate_promo_for_profile(code, profile, amount):
+    if not code:
+        return None, ""
+
+    normalized_code = code.strip().upper()
+    promo = PromoCode.objects.filter(code__iexact=normalized_code).first()
+
+    if not promo:
+        return None, "Invalid promo code."
+
+    is_available, message = promo.is_available_now()
+    if not is_available:
+        return None, message
+
+    if Decimal(amount) < promo.minimum_order_amount:
+        return None, f"Minimum order amount for this promo is ₹{promo.minimum_order_amount}."
+
+    used_count = PromoCodeUsage.objects.filter(
+        promo_code=promo,
+        profile=profile,
+    ).count()
+    if used_count >= promo.max_uses_per_user:
+        return None, "You have already used this promo code."
+
+    return promo, ""
+
+
+#  Create Razorpay Order
+def create_order(request):
+    if not razorpay_client:
+        return JsonResponse({"status": "failed", "message": "Razorpay package is not installed."}, status=500)
+
+    amount_rupees = Decimal(str(settings.REGISTRATION_FEE))
+    amount = int(amount_rupees * 100)
+    profile_id = clean_int_id(
+        request.GET.get("profile_id")
+        or request.POST.get("profile_id")
+        or request.session.get("current_profile_id")
+        or request.session.get("latest_profile_id")
+    )
+    promo_code = (
+        request.GET.get("promo_code")
+        or request.POST.get("promo_code")
+        or request.session.get("applied_promo_code")
+    )
+
+    if not profile_id:
+        profile = find_profile_from_request(request)
+    else:
+        profile = find_profile_from_request(request, profile_id)
+
+    if not profile:
+        return JsonResponse({"status": "failed", "message": "Complete Step 1 first."}, status=400)
+
+    profile_id = str(profile.id)
+
+    order_payload = {
+        "amount": amount,
+        "currency": "INR",
+        "payment_capture": 1,
+        "receipt": f"nexokard-{profile.id}",
+        "notes": {
+            "profile_id": str(profile.id),
+            "promo_code": promo_code or "",
+        },
+    }
+
+    promo = None
+    if promo_code:
+        promo, promo_error = validate_promo_for_profile(promo_code, profile, amount_rupees)
+        if promo_error:
+            return JsonResponse({"status": "failed", "message": promo_error}, status=400)
+
+        order_payload["offers"] = [promo.razorpay_offer_id]
+        order_payload["force_offer"] = True
+
+    try:
+        print("Razorpay order payload:", order_payload)
+        order = razorpay_client.order.create(order_payload)
+    except Exception as e:
+        print("Razorpay order create error:", e)
+        return JsonResponse({
+            "status": "failed",
+            "message": "Unable to create Razorpay order. Please check internet/Razorpay credentials and try again.",
+        }, status=502)
+    request.session[f"order_profile_{order['id']}"] = profile.id
+    request.session["current_profile_id"] = profile.id
+
+    if promo and profile_id:
+        request.session[f"promo_order_{order['id']}"] = {
+            "promo_id": promo.id,
+            "profile_id": int(profile_id),
+            "amount": str(amount_rupees),
+        }
+
+    print('amount',amount)
+    print('order',order)
+    response = {
+        "order_id": order["id"],
+        "amount": amount,
+        "currency": order.get("currency", "INR"),
+        "profile_id": profile.id,
+        "key": settings.API_ID
+    }
+    if promo:
+        response.update({
+            "promo_code": promo.code,
+            "offer_id": promo.razorpay_offer_id,
+        })
+    return JsonResponse(response)
+
+
+def validate_promo_code(request):
+    amount_rupees = Decimal(str(settings.REGISTRATION_FEE))
+    promo_code = request.GET.get("promo_code") or request.POST.get("promo_code")
+
+    if not promo_code:
+        return JsonResponse({"status": "failed", "message": "Enter promo code."}, status=400)
+
+    profile_id = clean_int_id(
+        request.GET.get("profile_id")
+        or request.POST.get("profile_id")
+        or request.session.get("current_profile_id")
+        or request.session.get("latest_profile_id")
+    )
+    profile = find_profile_from_request(request, profile_id)
+
+    if not profile:
+        return JsonResponse({"status": "failed", "message": "Complete Step 1 first."}, status=400)
+
+    promo, promo_error = validate_promo_for_profile(promo_code, profile, amount_rupees)
+    if promo_error:
+        return JsonResponse({"status": "failed", "message": promo_error}, status=400)
+
+    request.session["current_profile_id"] = profile.id
+    request.session["applied_promo_code"] = promo.code
+
+    return JsonResponse({
+        "status": "success",
+        "message": "Promo code applied.",
+        "promo_code": promo.code,
+        "offer_id": promo.razorpay_offer_id,
+        "profile_id": profile.id,
+    })
+
+
+@csrf_exempt
+def verify_payment(request):
+    if request.method != "POST":
+        return JsonResponse({"status": "invalid"})
+    if not razorpay_client:
+        return JsonResponse({"status": "failed", "message": "Razorpay package is not installed."}, status=500)
+
+    try:
+        razorpay_client.utility.verify_payment_signature({
+            "razorpay_order_id": request.POST.get("razorpay_order_id"),
+            "razorpay_payment_id": request.POST.get("razorpay_payment_id"),
+            "razorpay_signature": request.POST.get("razorpay_signature"),
+        })
+
+        order_id = request.POST.get("razorpay_order_id")
+        payment_id = request.POST.get("razorpay_payment_id")
+        order_profile_key = f"order_profile_{order_id}"
+        profile_id = clean_int_id(request.session.get(order_profile_key))
+        if profile_id:
+            request.session["current_profile_id"] = int(profile_id)
+            request.session["latest_profile_id"] = int(profile_id)
+
+        promo_session_key = f"promo_order_{order_id}"
+        promo_data = request.session.get(promo_session_key)
+
+        if promo_data:
+            promo = PromoCode.objects.filter(id=promo_data.get("promo_id")).first()
+            profile = UserProfile.objects.filter(id=promo_data.get("profile_id")).first()
+
+            if promo and profile:
+                PromoCodeUsage.objects.get_or_create(
+                    promo_code=promo,
+                    profile=profile,
+                    defaults={
+                        "razorpay_offer_id": promo.razorpay_offer_id,
+                        "razorpay_order_id": order_id,
+                        "razorpay_payment_id": payment_id,
+                        "amount": Decimal(str(promo_data.get("amount", settings.REGISTRATION_FEE))),
+                    },
+                )
+
+            del request.session[promo_session_key]
+
+        if order_profile_key in request.session:
+            del request.session[order_profile_key]
+
+        return JsonResponse({"status": "success", "profile_id": profile_id})
+        
+
+        
+
+    except SignatureVerificationError:
+        return JsonResponse({"status": "failed"})
+    
+# @csrf_exempt
+# def verify_payment(request):
+
+#     if request.method != "POST":
+#         return JsonResponse({"status": "invalid"})
+
+#     try:
+#         razorpay_client.utility.verify_payment_signature({
+#             "razorpay_order_id": request.POST.get("razorpay_order_id"),
+#             "razorpay_payment_id": request.POST.get("razorpay_payment_id"),
+#             "razorpay_signature": request.POST.get("razorpay_signature"),
+#         })
+
+#         print("Payment verified")
+
+#         profile_id = request.session.get("latest_profile_id")
+#         print("Session profile:", profile_id)
+
+#         if not profile_id:
+#             return JsonResponse({"status": "success"})  # payment still success
+
+#         profile = UserProfile.objects.get(id=profile_id)
+
+#         name = profile.full_name
+#         mobile = "91" + str(profile.phone)
+#         url = profile.public_username
+
+#         data = {
+#             "name": name,
+#             "body": f"Nexokard http://localhost:70/bs/{url}"
+#         }
+
+#         res=send_whatsapp_message(data, mobile, "nc_template1")
+#         print('res',res)
+
+#         return JsonResponse({"status": "success"})
+
+#     except SignatureVerificationError:
+#         return JsonResponse({"status": "failed"})
+
+def generate_otp(request):
+    if request.method == 'POST':
+        mobile = request.POST.get('mobile_no') 
+
+        print('mobile',mobile)
+
+        try:
+            profile = UserProfile.objects.get(phone=mobile)
+        except UserProfile.DoesNotExist:
+            return JsonResponse({'status': False, 'message': 'Mobile not registered'})
+
+        # Clear old OTP (important for resend)
+        profile.otp = None
+        profile.otp_expiry = None
+        profile.save(update_fields=["otp", "otp_expiry"])
+
+        otp = random.randint(100000, 999999)
+
+        profile.otp = str(otp)
+        profile.otp_expiry = timezone.now() + timedelta(minutes=2)
+        profile.save()
+        print('otp',otp)
+
+        send_auth_message(mobile, otp)
+
+        request.session['otp_profile_id'] = profile.id
+        request.session.set_expiry(300)  # 5 minutes
+
+        return JsonResponse({'status': True, 'message': 'OTP sent'})
+
+
+
+def index(request):
+    if request.method == 'POST':
+        name=request.POST.get('name')
+        mobile_no=request.POST.get('mobile_no')
+        print('name',name)
+        print('mobile_no',mobile_no)
+
+        contat=Contact_team.objects.create(name=name,mobile_no=mobile_no)
+        contat.save()
+        messages.success(request,'Thank You For Interest in NexoKard. Our team will getback to you soon!!!..')
+        return redirect('index')
+
+    return render(request,'index.html')
+
+
+def terms_view(request):
+    return render(request,'nk_Terms.html')
+
+
+def refund_policy(request):
+    return render(request,'nk_Refund.html')
+
+def subscription_policy(request):
+    return render(request,'nk_Subscription.html')
+
+
+
+def privacy_policy(request):
+    return render(request,'nk_PrivacyPolicy.html')
+
+
+
+
+
+
+#----------------------Error_Handle--------------------
+
+
+
+
+def handler403(request, exception=None, template_name='Error/403.html'):
+    response = render(request=request, template_name=template_name)
+    response.status_code = 403
+    return response
+
+def handler500(request, exception=None, template_name='Error/500.html'):
+    response = render(request=request, template_name=template_name)
+    response.status_code = 500
+    return response
+
+def handler404(request, exception=None, template_name='Error/404.html'):
+    response = render(request=request, template_name=template_name)
+    response.status_code = 404
+    return response
+
+def handler400(request, exception=None, template_name='Error/400.html'):
+    response = render(request=request, template_name=template_name)
+    response.status_code = 400
+    return response
+
+def handler401(request, exception=None, template_name='Error/401.html'):
+    response = render(request=request, template_name=template_name)
+    response.status_code = 401
+    return response
+
+def csrf_failure(request, reason=""):
+    ctx = {'message': 'some custom messages'}
+    # return render_to_response("Error/403_csrf.html", ctx)
+    return render(None,"Error/403.html", ctx)
+
+# -----------------------------000---------------------------
+
+
+    
+
+html::>>>
+
+
+<!DOCTYPE html>
+{% load static %}
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NexoKard :: Application Form</title>
+
+    <!-- CSS Files -->
+    <link rel="stylesheet" href="{% static 'css/infistyle.css' %}">
+    <link rel="stylesheet" href="{% static 'css/infimedia.css' %}">
+    <link rel="stylesheet" href="{% static 'css/photoframe.css' %}">
+    <link rel="stylesheet" href="{% static 'css/pixel-photo-frame.css' %}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/4.7.0/css/font-awesome.min.css">
+    <link rel="stylesheet" href="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/css/bootstrap.min.css">
+
+    
+</head>
+<body>
+<header>
+    <div class="NC-logo">
+        <img src="{% static 'images/NC_Logo_White.png' %}">
+    </div>
+</header>
+<div class="Prompt-Container" id="PromptIDM">
+{% if messages %}
+    {% for message in messages %}
+        <div class="PromptSuccess">{{ message }}</div>
+    {% endfor %}
+{% endif %}
+</div>
+
+<div class="MainContent">
+    <form id="mainForm" method="post" enctype="multipart/form-data">
+        {% csrf_token %}
+
+        <!-- Hidden Inputs -->
+        <input type="hidden" id="step" name="step" value="{{ active_step|default:1 }}">
+        <input type="hidden" name="profile_id" id="profile_id" value="{% if profile %}{{ profile.id }}{% endif %}">
+
+        <!-- Progress Bar -->
+        <div class="progressbar">
+            <div class="progress" id="progress"></div>
+            <div class="progress-step" data-title="Personal Details"></div>
+            <div class="progress-step" data-title="Company Details"></div>
+            <div class="progress-step" data-title="Payment Details"></div>
+        </div>
+
+        <!-- ================= STEP 1 ================= -->
+        <div class="step-forms" id="step1">
+            <h2 class="Form-Title">Personal Details</h2>
+             <header>
+            <div class="hea-bg">
+
+                    {% if profile.banner %}
+                        <img src="{{ profile.banner.url }}" id="bannerPreview">
+                    {% else %}
+                        <img src="{% static 'images/NC_Banner_03.jpg' %}" id="bannerPreview">
+                         
+                    {% endif %}
+
+                    <label for="banner_img" class="Banner_Browse_Btn">
+                        <i class="fa fa-upload"></i> 
+                    </label>
+
+                    <input
+                        id="banner_img"
+                        type="file"
+                        name="banner"
+                        accept="image/*"
+                        onchange="previewBanner(event)">
+                </div>
+ 
+
+
+               <!-- Photo Upload -->
+            <div class="container">
+                <div class="row">
+                    <div class="col-md-12">
+                        <div class="form-group">
+                            <div class="confirm-identity">
+                                <div class="ci-user d-flex align-items-center justify-content-center">
+                                   <div class="ci-user-picture">
+    {% if profile.avatar %}
+        <img src="{{ profile.avatar.url }}" id="item-img-output" class="imgpreviewPrf img-fluid" alt="">
+    {% else %}
+        <img src="{% static 'images/defaultimg.jpg' %}" id="item-img-output" class="imgpreviewPrf img-fluid" alt="">
+    {% endif %}
+</div>
+                                </div>
+                                <div class="Row_Browse_Btn pd bg-blue" data-default="Profile Photo">
+                                    <a href="javascript:;" class="position-relative">
+                                        <input type="file" class="item-img file center-block filepreviewprofile">
+                                       <i class="fa fa-camera"></i>
+                                    </a>
+                                </div>
+                                <input id="photo" style="display:none;" type="file" name="photo">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Photo Crop Modal -->
+            <div class="modal fade cropImageModal" id="cropImagePop" tabindex="-1" role="dialog" aria-hidden="true">
+                <button type="button" class="close-modal-custom" data-dismiss="modal" aria-label="Close"><i class="feather icon-x"></i></button>
+                <div class="modal-dialog">
+                    <div class="modal-content">
+                        <div class="modal-body p-0">
+                            <div class="modal-header-bg"></div>
+                            <div class="up-photo-title">
+                                <h3 class="modal-title">Update Profile Photo</h3>
+                            </div>
+                            <div class="up-photo-content pb-5">
+                                <div id="upload-demo" class="center-block">
+                                    <h5><i class="fas fa-arrows-alt mr-1"></i> Drag your photo as you require</h5>
+                                </div>
+                                <div class="upload-action-btn text-center px-2 Master-Btn-Container">
+                                    <button type="button" id="cropImageBtn" class="Common-Btn">Save Photo</button>
+                                    <button type="button" class="Common-Btn replacePhoto position-relative">Replace Photo</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+
+              </header>
+            <div class="AEP-TwoSection">
+                <span><input type="text" name="name" placeholder="Enter Full Name" maxlength="30" required value="{{ profile.full_name|default:'' }}" required></span>
+                <span><input type="text" name="public_username" placeholder="Choose your card URL (optional)" maxlength="30" value="{{ profile.public_username|default:'' }}"></span>
+            </div>
+            <div class="AEP-TwoSection">
+                <span><input type="text" name="designation" placeholder="Enter Designation" maxlength="30" required value="{{ profile.title|default:'' }}"></span>
+                <span><input type="text" name="email_Id" placeholder="Enter Email Id" maxlength="80" required value="{{ profile.email|default:'' }}"></span>
+            </div>
+            <div class="AEP-TwoSection">
+                {% comment %} <span><input type="number" name="contct_num" placeholder="Enter Whatsapp Number" maxlength="10" required value="{{ profile.phone|default:'' }}"></span>
+                <span><input type="number" name="contct_num2" placeholder="Enter Contact Number" maxlength="10" value="{{ profile.phone2|default:'' }}"></span> {% endcomment %}
+                <span>
+                <input type="tel" name="contct_num" placeholder="Enter Whatsapp Number" pattern="[0-9]{10}" maxlength="10" required 
+                        value="{{ profile.phone|default:'' }}" 
+                        title="Please enter a 10-digit phone number">
+                </span>
+                <span>
+                <input type="tel" name="contct_num2" placeholder="Enter Contact Number" pattern="[0-9]{10}" maxlength="10"
+                        value="{{ profile.phone2|default:'' }}" 
+                        title="Please enter a 10-digit phone number">
+                </span>
+            </div>
+            <div class="AEP-OneSection">
+                <span><textarea name="address" placeholder="Enter Address">{{ profile.address|default:'' }}</textarea></span>
+            </div>
+            <div class="AEP-TwoSection">
+                <span><input type="text" name="personal_linked_url" placeholder="LinkedIn URL" value="{{ profile.personal_linked_url|default:'https://linkedin.com/' }}"></span>
+                <span><input type="text" name="personal_insta_url" placeholder="Instagram URL" value="{{ profile.personal_insta_url|default:'https://insta.com/' }}"></span>
+            </div>
+            <div class="AEP-TwoSection">
+                <span><input type="text" name="personal_fac_url" placeholder="Facebook URL" value="{{ profile.personal_facebook_url|default:'https://facebook.com/' }}"></span>
+                <span><input type="text" name="personal_twitter_url" placeholder="Twitter URL" value="{{ profile.personal_twitter_url|default:'https://twitter.com/' }}"></span>
+            </div>
+            <div class="Master-Btn-Container">
+                <button type="submit" class="btn-next Common-Btn">Save & Proceed</button>
+            </div>
+        </div>
+
+        <!-- ================= STEP 2 ================= -->
+        <div class="step-forms" id="step2">
+            <h2 class="Form-Title">Company Details</h2>
+            <hr class="infihr">
+            
+            <div class="AEP-TwoSection">
+                <span><input type="text" name="companyname" placeholder="Company Name" maxlength="100" value="{{ profile.company|default:'' }}"></span>
+                <span><input type="text" name="website" placeholder="Website URL" maxlength="100" value="{{ profile.website|default:'' }}"></span>
+            </div>
+            <div class="AEP-TwoSection">
+                <span><input type="text" name="companytagline1" placeholder="Company Tagline 1" maxlength="100" value="{{ profile.company_tagline1|default:'' }}"></span>
+                <span><input type="text" name="companytagline2" placeholder="Company Tagline 2" maxlength="100" value="{{ profile.company_tagline2|default:'' }}"></span>
+            </div>
+            <div class="AEP-TwoSection">
+                 <span> 
+                <label for="company_logo" class="upload_Browse_Btn" id="companylogo"><i class="fa fa-upload"></i> Upload Company Logo</label>
+                <input type="file" id="company_logo" name="company_logo" placeholder="Upload company logo" ></span>
+
+                <span><input type="text" name="company_email" placeholder="Email Id" maxlength="100" value="{{ profile.company_email|default:'' }}"></span>
+               
+            </div>
+            <div class="AEP-TwoSection">
+
+                 <span><input type="text" name="company_phone1" placeholder="Contact Number 1" maxlength="10" pattern="[0-9]{10}" value="{{ profile.company_phone1|default:'' }}"></span>
+                <span><input type="text" name="company_phone2" placeholder="Contact Number 2" maxlength="10" pattern="[0-9]{10}" value="{{ profile.company_phone2|default:'' }}"></span>
+                <!-- <span>  -->
+              
+                <!-- <input type="file" name="company_logo" placeholder="Upload company logo" ></span> -->
+                
+            </div>
+            <div class="AEP-OneSection">
+                <span><textarea name="intro" placeholder="Introduction Text" maxlength="500">{{ profile.intro|default:'' }}</textarea></span>
+            </div>
+
+            <!-- Branches -->
+            <div class="Main-Tbl">
+                <h2>Add Company Branches</h2>
+               <div class="addbtn">
+            <button class="Common-Btn" type="button" onclick="Adddmftbl2()"><i class="fa fa-plus"></i></button>
+        </div>
+                <table id="tbldmf1">
+                    <thead>
+                        <tr><th>#</th><th>Branch Name</th><th>Action</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for branch in profile.branches.all %}
+                        <tr>
+                            <td>{{ forloop.counter }}</td>
+                            <td><input type="text" name="branch_name[]" value="{{ branch.name }}" maxlength="50"></td>
+                            <td><button type="button"><i class="fa fa-trash"></i></button></td>
+                        </tr>
+                        {% endfor %}
+                        {% if profile.branches.count == 0 %}
+                        <tr>
+                            <td>1</td>
+                            <td><input type="text" name="branch_name[]" placeholder="Enter Branch Name" maxlength="50"></td>
+                            <td><button type="button"><i class="fa fa-trash"></i></button></td>
+                        </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Services -->
+            <div class="Servic-Tbl">
+                <h2>Add Services</h2>
+                <div class="addbtn"><button class="Common-Btn" type="button" id="add-row"><i class="fa fa-plus"></i></button></div>
+                <table id="tblCustomers2">
+                    <thead>
+                        <tr><th>#</th><th>Service Title</th><th>Service Tagline</th><th>Service Image</th><th>Action</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for service in profile.services.all %}
+                        <tr>
+                            <td>{{ forloop.counter }}</td>
+                            <td><input type="text" name="servicetitle[]" value="{{ service.title }}"></td>
+                            <td><input type="text" name="servicetagline[]" value="{{ service.description }}"></td>
+                            <td>
+                                <label for="serviceimg_{{ forloop.counter }}" class="Servic-Btn"><i class="fa fa-upload Browse_Btn"></i></label>
+                                <input type="file" id="serviceimg_{{ forloop.counter }}" name="serviceimg[]" style="display:none;">
+                            </td>
+                            <td><input class="remove-btn" type="button" value="🗑"></td>
+                        </tr>
+                        {% endfor %}
+                        {% if profile.services.count == 0 %}
+                        <tr>
+                            <td>1</td>
+                            <td><input type="text" name="servicetitle[]" placeholder="Enter Service Title"></td>
+                            <td><input type="text" name="servicetagline[]" placeholder="Enter Service Tagline"></td>
+                            <td>
+                                <label for="serviceimg_1" class="Servic-Btn"><i class="fa fa-upload Browse_Btn"></i></label>
+                                <input type="file" id="serviceimg_1" name="serviceimg[]" style="display:none;">
+                            </td>
+                            <td><input class="remove-btn" type="button" value="🗑"></td>
+                        </tr>
+                        {% endif %}
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Social Links -->
+            <h2 class="Form-Title">Social Media Details</h2>
+             <div class="AEP-TwoSection">
+                <span><input type="text" name="linkdin" placeholder="Enter Linkdin URL" value="https://linkedin.com/"  maxlength="100"></span>
+                <span><input type="text" name="instagram" placeholder="Enter Instagram URL" value="https://instagram.com/"  maxlength="100"></span>
+            </div>
+            <div class="AEP-TwoSection">
+                <span><input type="text" name="facebook" placeholder="Enter Facebook URL" value="https://facebook.com/"  maxlength="100"></span>
+                <span><input type="text" name="twitter" placeholder="Enter Twitter URL"  value="https://twitter.com/"  maxlength="100"></span>
+            </div>
+            <div class="AEP-TwoSection">
+                <span><input type="text" name="youtube" placeholder="Enter Youtube URL" value="https://youtube.com/"  maxlength="100"></span>
+                <span><input type="text" name="pinterest" placeholder="Enter pinterest URL"  value="https://pinterest.com/"  maxlength="100"></span>
+            </div>
+
+            <div class="Master-Btn-Container">
+                <!-- <a href="#" class="Common-Btn btn-prev">Previous</a> -->
+                 <button type="submit" name="btn-prev" class="Common-Btn btn-prev">Previous</button>
+                <button type="submit" class="Common-Btn btn-next">Submit & Proceed to Pay</button>
+            </div>
+        </div>
+
+        <!-- ================= STEP 3 ================= -->
+        <div class="step-forms" id="step3">
+            <h5>One Year Subscription</h5>
+            <p>₹ <s>2400</s> 260 /-</p>
+            <div class="AEP-OneSection promo-code-row">
+                <span>
+                    <input type="text" id="promo_code" name="promo_code" placeholder="Enter promo code">
+                </span>
+                <button type="button" id="applyPromoBtn" class="Common-Btn" onclick="applyPromoCode(this)">Apply</button>
+            </div>
+            <p id="promoMessage" style="display:none;"></p>
+            <input type="hidden" name="razorpay_payment_id" id="razorpay_payment_id">
+            <div class="Master-Btn-Container">
+                <!-- <a href="#" class="Common-Btn btn-prev">Previous</a> -->
+                 <button type="submit" name="btn-prev" class="Common-Btn btn-prev">Previous</button>
+                <button type="button" id="payNowBtn" class="Common-Btn" onclick="startPayment(this)">Pay Now</button>
+            </div>
+        </div>
+    </form>
+
+    
+</div>
+
+<footer class="footer">
+    <p>Copyright © 2026 All Rights Reserved. Powered by <a href="https://pixelstat.com/">PIXELSTAT</a></p>
+</footer>
+
+<!-- 
+<script>
+    // // Show correct step
+    // let activeStep = {{ active_step|default:1 }};
+    // document.querySelectorAll(".step-forms").forEach((s,i)=>{
+    //     if(i+1==activeStep) s.classList.add("step-forms-active");
+    //     else s.classList.remove("step-forms-active");
+    // });
+
+    // Next / Prev
+    
+   document.querySelectorAll(".btn-next").forEach(btn=>{
+    btn.addEventListener("click", function(e){
+
+        const form = this.closest("form");
+
+        if(!form.checkValidity()){
+            e.preventDefault();
+            form.reportValidity();
+            return;
+        }
+
+        form.querySelector("#step").value = activeStep;
+    });
+});
+    document.querySelectorAll(".btn-prev").forEach(btn=>{
+        btn.addEventListener("click", e=>{
+            e.preventDefault();
+            if(activeStep>1){
+                activeStep--; 
+                // location.reload();
+
+                document.querySelectorAll(".btn-prev").forEach(btn=>{
+    btn.addEventListener("click", function(e){
+        e.preventDefault();
+
+        const form = document.getElementById("mainForm");
+        let stepInput = document.getElementById("step");
+
+        let currentStep = parseInt(stepInput.value);
+
+        if(currentStep > 1){
+            stepInput.value = currentStep - 1; // 👈 go back
+            form.submit(); // 👈 send to Django
+        }
+    });
+});
+            }
+        });
+    });
+</script> -->
+</body>
+</html>
+<!-- JS -->
+<script src="{% static 'js/infi.js' %}"></script>
+<script src="{% static 'js/infistepform.js' %}"></script>
+<script src="https://code.jquery.com/jquery-3.4.1.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/popper.js@1.16.0/dist/umd/popper.min.js"></script>
+<script src="https://stackpath.bootstrapcdn.com/bootstrap/4.4.1/js/bootstrap.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/croppie/2.6.5/croppie.min.js"></script>
+<script src="{% static 'js/photoframe.js' %}"></script>
+<script src="{% static 'js/pixel-photo-frame.js' %}"></script>
+
+<!-- Prompt Messages -->
+<div class="Prompt-Container" id="PromptIDM">
+    {% if success %}
+        <div class="PromptSuccess">{{ success }}</div>
+    {% endif %}
+    {% if error %}
+        <div class="PromptFail">{{ error }}</div>
+    {% endif %}
+</div>
+
+<script>
+document.addEventListener("DOMContentLoaded", function(){
+
+    let steps = document.querySelectorAll(".step-forms");
+    let progressSteps = document.querySelectorAll(".progress-step");
+    
+    let stepInput = document.getElementById("step");
+    let mainForm = document.getElementById("mainForm");
+
+    document.querySelectorAll(".btn-prev").forEach(btn=>{
+        btn.addEventListener("click", function(e){
+            e.preventDefault(); // prevent default button behavior
+
+            // Set step value to previous step
+            let currentStep = parseInt(stepInput.value || 1);
+            if(currentStep > 1){
+                // stepInput.value = currentStep - 1;
+
+                // Add a hidden field to indicate 'previous' click
+                let prevFlag = document.createElement("input");
+                prevFlag.type = "hidden";
+                prevFlag.name = "btn-prev"; // backend checks this
+                prevFlag.value = "1";
+                mainForm.appendChild(prevFlag);
+
+                // Submit form
+                mainForm.submit();
+            }
+        });
+    });
+
+    /* ---------------- STEP CONTROL ---------------- */
+    let activeStep = parseInt(stepInput.value || 1);
+
+    function showStep(step){
+        steps.forEach((s,i)=>{
+            s.classList.toggle("step-forms-active", i === step-1);
+        });
+
+        progressSteps.forEach((s,i)=>{
+            s.classList.toggle("progress-step-active", i < step);
+        });
+
+        stepInput.value = step;
+    }
+
+    showStep(activeStep);
+
+    /* ---------------- NEXT BUTTON ---------------- */
+    document.querySelectorAll(".btn-next").forEach(btn=>{
+        btn.addEventListener("click", function(e){
+
+            const currentStepDiv = this.closest(".step-forms");
+
+            // Validate required fields
+            const requiredFields = currentStepDiv.querySelectorAll("[required]");
+            for (let field of requiredFields){
+                if (!field.checkValidity()){
+                    e.preventDefault();
+                    field.reportValidity();
+                    return;
+                }
+            }
+
+            let stepIndex = Array.from(steps).indexOf(currentStepDiv) + 1;
+            stepInput.value = stepIndex; // send current step to backend
+        });
+    });
+
+    /* ---------------- PREVIOUS BUTTON ---------------- */
+//   document.querySelectorAll(".btn-prev").forEach(btn=>{
+//     btn.addEventListener("click", function(){
+//         let stepInput = document.getElementById("step");
+//         let currentStep = parseInt(stepInput.value);
+
+//         if(currentStep > 1){
+//             stepInput.value = currentStep - 1;
+//             document.getElementById("mainForm").submit();
+
+//         }
+
+//     });
+// });
+
+    /* ---------------- PROMPT AUTO HIDE ---------------- */
+    let prompt = document.getElementById("PromptIDM");
+    if(prompt && prompt.children.length > 0){
+        prompt.style.display = "block";
+        setTimeout(()=> prompt.style.display="none", 3000);
+    }
+
+    /* ---------------- SERVICES ---------------- */
+    let serviceIndex = 2;
+
+    document.getElementById("add-row")?.addEventListener("click", function(){
+        const tbody = document.querySelector("#tblCustomers2 tbody");
+
+        if(tbody.rows.length >= 5){
+            alert("Max 5 services");
+            return;
+        }
+
+        const row = tbody.insertRow();
+        row.innerHTML = `
+            <td></td>
+            <td><input type="text" name="servicetitle[]" required></td>
+            <td><input type="text" name="servicetagline[]"></td>
+            <td>
+                <input type="file" name="serviceimg[]">
+            </td>
+            <td><button type="button" class="remove-btn">🗑</button></td>
+        `;
+
+        serviceIndex++;
+        resetServiceSerial();
+    });
+
+    document.querySelector("#tblCustomers2 tbody")?.addEventListener("click", function(e){
+        if(e.target.classList.contains("remove-btn")){
+            e.target.closest("tr").remove();
+            resetServiceSerial();
+        }
+    });
+
+    function resetServiceSerial(){
+        const rows = document.querySelectorAll("#tblCustomers2 tbody tr");
+        rows.forEach((row,i)=>{
+            row.cells[0].innerText = i+1;
+        });
+    }
+
+    resetServiceSerial();
+
+    /* ---------------- BRANCHES ---------------- */
+    window.Adddmftbl2 = function(){
+        const tbody = document.querySelector("#tbldmf1 tbody");
+
+        if(tbody.rows.length >= 5){
+            alert("Max 5 branches");
+            return;
+        }
+
+        const row = tbody.insertRow();
+        row.innerHTML = `
+            <td></td>
+            <td><input type="text" name="branch_name[]" required></td>
+            <td>
+                <button type="button" onclick="this.closest('tr').remove(); resetBranchSerial();">
+                    🗑
+                </button>
+            </td>
+        `;
+
+        resetBranchSerial();
+    };
+
+    window.resetBranchSerial = function(){
+        const rows = document.querySelectorAll("#tbldmf1 tbody tr");
+        rows.forEach((row,i)=>{
+            row.cells[0].innerText = i+1;
+        });
+    };
+
+    resetBranchSerial();
+});
+
+
+/* ================= RAZORPAY ================= */
+let paymentInProgress = false;
+let rzpInstance = null;
+let promoApplied = false;
+
+function getPromoParams(){
+    return new URLSearchParams({
+        profile_id: document.getElementById("profile_id").value || "",
+        public_username: document.querySelector("[name='public_username']")?.value || "",
+        contct_num: document.querySelector("[name='contct_num']")?.value || "",
+        promo_code: document.getElementById("promo_code").value || ""
+    });
+}
+
+function parseJsonResponse(res){
+    return res.text().then(text => {
+        let data = {};
+
+        try {
+            data = text ? JSON.parse(text) : {};
+        } catch (e) {
+            throw new Error("Server returned an HTML error page. Please restart Django and check the terminal error.");
+        }
+
+        if(!res.ok){
+            throw new Error(data.message || "Request failed.");
+        }
+
+        return data;
+    });
+}
+
+function applyPromoCode(btn){
+    const promoInput = document.getElementById("promo_code");
+
+    if(!promoInput.value.trim()){
+        showPromoMessage("Enter promo code.", false);
+        return;
+    }
+
+    btn.disabled = true;
+    btn.innerText = "Checking...";
+
+    fetch("/validate-promo/?" + getPromoParams().toString())
+    .then(parseJsonResponse)
+    .then(data => {
+        promoApplied = true;
+        if(data.profile_id){
+            document.getElementById("profile_id").value = data.profile_id;
+        }
+        promoInput.value = data.promo_code || promoInput.value;
+        showPromoMessage(data.message || "Promo code applied.", true);
+    })
+    .catch(err => {
+        promoApplied = false;
+        showPromoMessage(err.message || "Invalid promo code.", false);
+    })
+    .finally(() => {
+        btn.disabled = false;
+        btn.innerText = "Apply";
+    });
+}
+
+function startPayment(btn){
+
+    if(paymentInProgress) return;
+
+    paymentInProgress = true;
+    btn.disabled = true;
+    btn.innerText = "Processing...";
+
+    const params = getPromoParams();
+
+    fetch("/create-order/?" + params.toString())
+    .then(parseJsonResponse)
+    .then(data => {
+        showPromoMessage(data.promo_code ? "Promo code applied." : "", true);
+
+        const options = {
+            key: data.key,
+            amount: data.amount,
+            currency: data.currency || "INR",
+            order_id: data.order_id,
+
+            name: "Pixelstat eSolution",
+            description: "1 Year Access",
+            prefill: {
+                name: document.querySelector("[name='name']")?.value || "",
+                email: document.querySelector("[name='email_Id']")?.value || "",
+                contact: document.querySelector("[name='contct_num']")?.value || ""
+            },
+
+            handler: function(response){
+                verifyPayment(response);
+            },
+
+            modal: {
+                ondismiss: function(){
+                    sendPaymentFailed();
+                    resetPaymentButton(btn);
+                    rzpInstance = null;
+                }
+            }
+        };
+
+        rzpInstance = new Razorpay(options);
+        rzpInstance.open();
+
+    })
+    .catch(err=>{
+        console.error(err);
+        showPromoMessage(err.message || "Payment failed to start", false);
+        resetPaymentButton(btn);
+    });
+}
+
+function showPromoMessage(message, isSuccess){
+    const promoMessage = document.getElementById("promoMessage");
+    if(!promoMessage) return;
+
+    if(!message){
+        promoMessage.style.display = "none";
+        promoMessage.innerText = "";
+        return;
+    }
+
+    promoMessage.style.display = "block";
+    promoMessage.innerText = message;
+    promoMessage.style.color = isSuccess ? "green" : "red";
+    promoMessage.style.textAlign = "center";
+    promoMessage.style.fontSize = "24px";
+    promoMessage.style.margin = "12px 0 28px";
+}
+
+function sendPaymentFailed(){
+
+    fetch("/create/", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: new URLSearchParams({
+            step: "3",
+            profile_id: document.getElementById("profile_id").value,
+            payment_failed: "true"
+        })
+    });
+}
+
+function verifyPayment(response){
+
+    fetch("/verify-payment/", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body:
+            "razorpay_payment_id=" + response.razorpay_payment_id +
+            "&razorpay_order_id=" + response.razorpay_order_id +
+            "&razorpay_signature=" + response.razorpay_signature
+    })
+    .then(parseJsonResponse)
+    .then(data => {
+
+        if(data.status === "success"){
+
+            if(rzpInstance) rzpInstance.close();
+
+            let form = document.getElementById("mainForm");
+
+            if(data.profile_id){
+                document.getElementById("profile_id").value = data.profile_id;
+            }
+
+            let input = document.createElement("input");
+            input.type = "hidden";
+            input.name = "razorpay_payment_id";
+            input.value = response.razorpay_payment_id;
+
+            form.appendChild(input);
+
+            document.getElementById("step").value = "3";
+            form.submit();
+
+        } else {
+            alert("Payment verification failed");
+        }
+    });
+}
+
+function resetPaymentButton(btn){
+    paymentInProgress = false;
+    if(btn){
+        btn.disabled = false;
+        btn.innerText = "Pay Now";
+    }
+}
+</script>
+
+<style>
+.promo-code-row {
+    align-items: stretch;
+    display: flex;
+    gap: 10px;
+    margin: 18px auto 0;
+    max-width: 900px;
+    width: 100%;
+}
+
+.promo-code-row span {
+    flex: 1;
+}
+
+.promo-code-row input {
+    box-sizing: border-box;
+    height: 44px;
+    width: 100% !important;
+}
+
+.promo-code-row #applyPromoBtn {
+    height: 44px;
+    margin: 0;
+    min-width: 120px;
+}
+
+@media (max-width: 640px) {
+    .promo-code-row {
+        flex-direction: column;
+    }
+
+    .promo-code-row #applyPromoBtn {
+        width: 100%;
+    }
+}
+</style>
+
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+<!-- <script src="{% static 'js/inspect.js' %}"></script> -->
+</body>
+</html>
+
+
+
+
+
+urls::>>>
+
+
+"""
+URL configuration for pixyproject project.
+
+The `urlpatterns` list routes URLs to views. For more information please see:
+    https://docs.djangoproject.com/en/5.2/topics/http/urls/
+Examples:
+Function views
+    1. Add an import:  from my_app import views
+    2. Add a URL to urlpatterns:  path('', views.home, name='home')
+Class-based views
+    1. Add an import:  from other_app.views import Home
+    2. Add a URL to urlpatterns:  path('', Home.as_view(), name='home')
+Including another URLconf
+    1. Import the include() function: from django.urls import include, path
+    2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
+"""
+from django.contrib import admin
+from django.urls import path,re_path
+from cardapp import views
+from django.conf import settings
+from django.conf.urls.static import static
+from django.views.static import serve
+
+
+
+urlpatterns = [
+    path('pixelmaster/', admin.site.urls),
+    path('frontpage/',views.frontpage,name='frontpage'),
+    path("create/", views.create_card, name="create_card"),      
+    # path("edit/<int:pk>/", views.edit_card, name="edit_card"),   
+    # path("card/<str:public_username>/", views.business_card, name="business_card"),  
+    path("card/<str:public_username>/", views.view_business_card, name="view_business_card"),   
+    
+    path("bc/<str:public_username>/", views.business_card, name="business_card"),   
+    # urls.py  
+    # urls.py
+    path("edit_card/<int:pk>/", views.edit_card, name="edit_card"),
+
+
+    # path("thankyou/", views.thankyou, name="thankyou"),  
+    path('generate-otp/', views.generate_otp, name='generate_otp'),
+    path('verify-otp/', views.verify_otp, name='verify_otp'),
+
+    path('save-form/', views.save_form, name='save_form'),
+    
+    
+    path("create-order/", views.create_order, name="create_order"),
+    path("validate-promo/", views.validate_promo_code, name="validate_promo_code"),
+    path("verify-payment/", views.verify_payment, name="verify_payment"),
+    path("",views.index, name="index"),
+    path("Terms-view/",views.terms_view, name="terms_view"),
+    path("refund_policy/",views.refund_policy, name="refund_policy"),
+    path("subscription-policy/",views.subscription_policy, name="subscription_policy"),
+    path("privacy-policy/",views.privacy_policy, name="privacy_policy"),
+    
+    # path("create-order/",views. create_order),
+    # path("verify-payment/",views. verify_payment),
+    path("thankyou/", views.thankyou, name="thankyou"),
+    path("indexss/", views.indexss, name="indexss"),
+# urls.py
+# path('thankyou/<int:pk>/', views.thankyou, name='thankyou'),
+
+    # path("create-order/",views. create_order, name="create_order"),
+    
+
+    # path("edit-card/<int:pk>/", views.edit_card, name="edit_card"),
+       
+] + static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+
+
+# Serve static and media files during development (DEBUG=True)
+if settings.DEBUG:
+    urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT)
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+
+# Serve static and media files in production (DEBUG=False)
+else:
+    urlpatterns += [
+        re_path(r'^static/(?P<path>.*)$', serve, {'document_root': settings.STATIC_ROOT}),
+        re_path(r'^media/(?P<path>.*)$', serve, {'document_root': settings.MEDIA_ROOT, 'show_indexes': True}),
+    ]
+
+
+handler500 = 'cardapp.views.handler500'
+handler404 = 'cardapp.views.handler404'
+handler403 = 'cardapp.views.handler403'
+handler400 = 'cardapp.views.handler400'
+handler401 = 'cardapp.views.handler401'
+
+
+
+
+
+
+
+
+
+
+
+
