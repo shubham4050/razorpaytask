@@ -1,0 +1,1846 @@
+
+================================
+
+Workspace:
+D:\ABCD\Workflow ppt
+
+Main work completed:
+1. Added public Raise Query form.
+2. Added Customer Query table/model.
+3. Added separate custom Manager Admin UI.
+4. Added separate Manager Login page.
+5. Added Promo Code Add/Edit UI in Manager panel.
+6. Added Promo Code Usage UI in Manager panel.
+7. Added Dashboard, Completed, Pending, Queries pages in Manager panel.
+
+
+New/Updated URLs
+----------------
+File:
+pixyproject\urls.py
+
+Added:
+
+path("raise-query/", views.raise_query, name="raise_query"),
+path("manager/login/", views.manager_login, name="manager_login"),
+path("manager/logout/", views.manager_logout, name="manager_logout"),
+path("manager/", views.manager_dashboard, name="manager_dashboard"),
+path("manager/completed/", views.manager_completed, name="manager_completed"),
+path("manager/pending/", views.manager_pending, name="manager_pending"),
+path("manager/queries/", views.manager_queries, name="manager_queries"),
+path("manager/promo-codes/", views.manager_promo_codes, name="manager_promo_codes"),
+path("manager/promo-codes/<int:promo_id>/edit/", views.manager_promo_codes, name="manager_promo_code_edit"),
+path("manager/promo-usage/", views.manager_promo_usage, name="manager_promo_usage"),
+
+
+New Model Added
+---------------
+File:
+cardapp\models.py
+
+Added CustomerQuery model:
+
+class CustomerQuery(models.Model):
+    QUERY_TYPE_CHOICES = [
+        ("payment", "Payment"),
+        ("card_update", "Card Update"),
+        ("login_otp", "Login / OTP"),
+        ("cancellation", "Cancellation / Refund"),
+        ("other", "Other"),
+    ]
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("in_process", "In Process"),
+        ("resolved", "Resolved"),
+        ("closed", "Closed"),
+    ]
+
+    query_id = models.CharField(max_length=20, unique=True, blank=True)
+    name = models.CharField(max_length=100, blank=True, null=True)
+    contact_no = models.CharField(max_length=15)
+    query_type = models.CharField(max_length=30, choices=QUERY_TYPE_CHOICES, default="payment")
+    message = models.TextField(blank=True, null=True)
+    proof_of_evidence = models.FileField(upload_to="query_evidence/", blank=True, null=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    query_date = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-query_date"]
+        verbose_name = "Customer Query"
+        verbose_name_plural = "Customer Queries"
+
+    def __str__(self):
+        return f"{self.query_id} - {self.contact_no}"
+
+    def save(self, *args, **kwargs):
+        if not self.query_id:
+            last_query = CustomerQuery.objects.order_by("-id").first()
+            next_id = 1
+            if last_query and last_query.query_id:
+                last_number = "".join(filter(str.isdigit, last_query.query_id))
+                if last_number:
+                    next_id = int(last_number) + 1
+            self.query_id = f"QRY{next_id:05d}"
+        super().save(*args, **kwargs)
+
+
+New Migration Added
+-------------------
+File:
+cardapp\migrations\0008_customerquery.py
+
+Purpose:
+Creates the CustomerQuery database table.
+
+Migration applied successfully using:
+python manage.py migrate
+
+
+Django Admin Update
+-------------------
+File:
+cardapp\admin.py
+
+Added CustomerQuery admin registration:
+
+@admin.register(CustomerQuery)
+class CustomerQueryAdmin(admin.ModelAdmin):
+    list_display = (
+        "query_id",
+        "contact_no",
+        "name",
+        "query_type",
+        "query_date",
+        "status",
+    )
+    search_fields = ("query_id", "contact_no", "name", "message")
+    list_filter = ("query_type", "status", "query_date")
+    readonly_fields = ("query_id", "query_date", "updated_at")
+    ordering = ("-query_date",)
+
+
+Public Raise Query Page
+-----------------------
+New template:
+cardapp\templates\nk_raise_query.html
+
+New view:
+cardapp\views.py
+
+def raise_query(request):
+    if request.method == "POST":
+        name = request.POST.get("name", "").strip()
+        contact_no = request.POST.get("contact_no", "").strip()
+        query_type = request.POST.get("query_type", "").strip()
+        message = request.POST.get("message", "").strip()
+        proof_of_evidence = request.FILES.get("proof_of_evidence")
+
+        if not contact_no:
+            messages.error(request, "Contact number is required.")
+            return render(request, "nk_raise_query.html")
+
+        query = CustomerQuery.objects.create(
+            name=name,
+            contact_no=contact_no,
+            query_type=query_type or "payment",
+            message=message,
+            proof_of_evidence=proof_of_evidence,
+        )
+        messages.success(request, f"Your query has been raised successfully. Query ID: {query.query_id}")
+        return redirect("raise_query")
+
+    return render(request, "nk_raise_query.html")
+
+
+Home/Subscription Page Links
+----------------------------
+Updated templates:
+cardapp\templates\index.html
+cardapp\templates\nk_Subscription.html
+
+Added Raise Query link in sidebar/footer:
+
+<a href="{% url 'raise_query' %}">Raise Query</a>
+
+
+Separate Manager Login
+----------------------
+New template:
+cardapp\templates\manager\login.html
+
+New views:
+cardapp\views.py
+
+def manager_login(request):
+    if request.user.is_authenticated and request.user.is_staff:
+        return redirect("manager_dashboard")
+
+    next_url = request.GET.get("next") or request.POST.get("next") or "manager_dashboard"
+
+    if request.method == "POST":
+        username = request.POST.get("username", "").strip()
+        password = request.POST.get("password", "")
+        user = authenticate(request, username=username, password=password)
+
+        if user and user.is_active and user.is_staff:
+            login(request, user)
+            return redirect(next_url)
+
+        messages.error(request, "Invalid manager login details.")
+
+    return render(request, "manager/login.html", {"next": next_url})
+
+def manager_logout(request):
+    logout(request)
+    return redirect("manager_login")
+
+
+Manager Panel Protection
+------------------------
+All manager pages use staff login check:
+
+def AdminManagerRole(user):
+    return user.is_active and user.is_staff
+
+Example:
+
+@user_passes_test(AdminManagerRole, login_url="/manager/login/")
+def manager_dashboard(request):
+    ...
+
+
+New Manager Templates
+---------------------
+Added:
+
+cardapp\templates\manager\base_admin.html
+cardapp\templates\manager\dashboard.html
+cardapp\templates\manager\profiles.html
+cardapp\templates\manager\queries.html
+cardapp\templates\manager\promo_codes.html
+cardapp\templates\manager\promo_usage.html
+cardapp\templates\manager\login.html
+
+
+Manager Dashboard
+-----------------
+File:
+cardapp\views.py
+
+View:
+manager_dashboard
+
+Shows:
+- Total Profiles
+- Completed Profiles
+- Pending Profiles
+- Total Queries
+- Total Collected Amount
+- Amount Balance In Account
+- Promo Usage Amount
+- Recent Completed Profiles
+- Recent Queries
+
+
+Completed and Pending Pages
+---------------------------
+Files:
+cardapp\views.py
+cardapp\templates\manager\profiles.html
+
+Views:
+manager_completed
+manager_pending
+
+Shows table columns:
+- S.No.
+- Transaction ID
+- Order ID
+- Payment ID
+- Customer Name
+- Mobile No.
+- Amount Paid
+- Discount Applied
+- Final Paid Amount
+- Payment Mode
+- Payment Status
+- Payment Date & Time
+- Invoice / Receipt
+
+Filters:
+- Start Date
+- End Date
+- Contact Number
+- Card URL
+- Payment ID
+
+
+Queries Manager Page
+--------------------
+Files:
+cardapp\views.py
+cardapp\templates\manager\queries.html
+
+View:
+manager_queries
+
+Shows:
+- Query ID
+- Contact No.
+- Name
+- Date
+- Type
+- Proof / Evidence
+- Message
+- Status
+- Action
+
+Admin can update query status:
+- Pending
+- In Process
+- Resolved
+- Closed
+
+
+Promo Code Add/Edit Page
+------------------------
+Files:
+cardapp\views.py
+cardapp\templates\manager\promo_codes.html
+
+View:
+manager_promo_codes
+
+Fields:
+- Code
+- Razorpay Offer ID
+- Discount Type
+- Discount Value
+- Max Discount Amount
+- Minimum Order Amount
+- Max Uses Total
+- Max Uses Per User
+- Valid From
+- Valid Until
+- Active
+
+This works with existing PromoCode table.
+
+
+Promo Code Usage Page
+---------------------
+Files:
+cardapp\views.py
+cardapp\templates\manager\promo_usage.html
+
+View:
+manager_promo_usage
+
+Shows:
+- Code
+- Customer Name
+- Contact No.
+- Razorpay Offer ID
+- Order ID
+- Payment ID
+- Amount
+- Used At
+
+Filters:
+- Start Date
+- End Date
+- Promo Code
+- Order ID
+- Payment ID
+
+
+Small Fix Done
+--------------
+File:
+cardapp\views.py
+
+Updated home contact form handling:
+
+mobile_no = request.POST.get('mobile_no') or request.POST.get('mobile_number')
+
+Reason:
+The HTML form used mobile_number, but the backend was reading mobile_no.
+
+
+Verification Done
+-----------------
+Commands run:
+
+python manage.py check
+python manage.py makemigrations --check --dry-run
+python manage.py migrate
+
+Tested:
+- /raise-query/ GET and POST
+- /manager/ redirects to /manager/login/
+- /manager/login/ renders
+- Staff login redirects to /manager/
+- /manager/logout/ redirects to /manager/login/
+- All manager pages render successfully
+- Promo code add form saves successfully
+
+
+Main Access Links
+-----------------
+Manager Login:
+http://127.0.0.1:8000/manager/login/
+
+Manager Dashboard:
+http://127.0.0.1:8000/manager/
+
+Raise Query:
+http://127.0.0.1:8000/raise-query/
+
+Django Admin:
+http://127.0.0.1:8000/pixelmaster/
+
+
+============================================================
+FULL FILE-WISE CODE ADDED / CHANGED
+============================================================
+
+Below is the file-wise code that was added or changed by Codex.
+This section is prepared so this TXT file can be shared by itself.
+
+
+1. FILE: pixyproject\urls.py
+----------------------------
+Code added inside urlpatterns:
+
+path("raise-query/", views.raise_query, name="raise_query"),
+path("manager/login/", views.manager_login, name="manager_login"),
+path("manager/logout/", views.manager_logout, name="manager_logout"),
+path("manager/", views.manager_dashboard, name="manager_dashboard"),
+path("manager/completed/", views.manager_completed, name="manager_completed"),
+path("manager/pending/", views.manager_pending, name="manager_pending"),
+path("manager/queries/", views.manager_queries, name="manager_queries"),
+path("manager/promo-codes/", views.manager_promo_codes, name="manager_promo_codes"),
+path("manager/promo-codes/<int:promo_id>/edit/", views.manager_promo_codes, name="manager_promo_code_edit"),
+path("manager/promo-usage/", views.manager_promo_usage, name="manager_promo_usage"),
+
+
+2. FILE: cardapp\models.py
+--------------------------
+Code added after Contact_team model:
+
+class CustomerQuery(models.Model):
+    QUERY_TYPE_CHOICES = [
+        ("payment", "Payment"),
+        ("card_update", "Card Update"),
+        ("login_otp", "Login / OTP"),
+        ("cancellation", "Cancellation / Refund"),
+        ("other", "Other"),
+    ]
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("in_process", "In Process"),
+        ("resolved", "Resolved"),
+        ("closed", "Closed"),
+    ]
+
+    query_id = models.CharField(max_length=20, unique=True, blank=True)
+    name = models.CharField(max_length=100, blank=True, null=True)
+    contact_no = models.CharField(max_length=15)
+    query_type = models.CharField(max_length=30, choices=QUERY_TYPE_CHOICES, default="payment")
+    message = models.TextField(blank=True, null=True)
+    proof_of_evidence = models.FileField(upload_to="query_evidence/", blank=True, null=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    query_date = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-query_date"]
+        verbose_name = "Customer Query"
+        verbose_name_plural = "Customer Queries"
+
+    def __str__(self):
+        return f"{self.query_id} - {self.contact_no}"
+
+    def save(self, *args, **kwargs):
+        if not self.query_id:
+            last_query = CustomerQuery.objects.order_by("-id").first()
+            next_id = 1
+            if last_query and last_query.query_id:
+                last_number = "".join(filter(str.isdigit, last_query.query_id))
+                if last_number:
+                    next_id = int(last_number) + 1
+            self.query_id = f"QRY{next_id:05d}"
+        super().save(*args, **kwargs)
+
+
+3. FILE: cardapp\admin.py
+-------------------------
+Code added:
+
+@admin.register(CustomerQuery)
+class CustomerQueryAdmin(admin.ModelAdmin):
+    list_display = (
+        "query_id",
+        "contact_no",
+        "name",
+        "query_type",
+        "query_date",
+        "status",
+    )
+    search_fields = ("query_id", "contact_no", "name", "message")
+    list_filter = ("query_type", "status", "query_date")
+    readonly_fields = ("query_id", "query_date", "updated_at")
+    ordering = ("-query_date",)
+
+
+4. FILE: cardapp\views.py
+-------------------------
+Imports added:
+
+from django.db.models import Sum
+from django.core.paginator import Paginator
+from django.contrib.auth.decorators import user_passes_test
+from django.contrib.auth import authenticate, login, logout
+from django.utils.dateparse import parse_date, parse_datetime
+
+
+Small code changed in index view:
+
+def index(request):
+    if request.method == 'POST':
+        name=request.POST.get('name')
+        mobile_no=request.POST.get('mobile_no') or request.POST.get('mobile_number')
+
+        contat=Contact_team.objects.create(name=name,mobile_no=mobile_no)
+        contat.save()
+        messages.success(request,'Thank You For Interest in NexoKard. Our team will getback to you soon!!!..')
+        return redirect('index')
+
+    return render(request,'index.html')
+
+
+Raise query view added:
+
+def raise_query(request):
+    if request.method == "POST":
+        name = request.POST.get("name", "").strip()
+        contact_no = request.POST.get("contact_no", "").strip()
+        query_type = request.POST.get("query_type", "").strip()
+        message = request.POST.get("message", "").strip()
+        proof_of_evidence = request.FILES.get("proof_of_evidence")
+
+        if not contact_no:
+            messages.error(request, "Contact number is required.")
+            return render(request, "nk_raise_query.html")
+
+        query = CustomerQuery.objects.create(
+            name=name,
+            contact_no=contact_no,
+            query_type=query_type or "payment",
+            message=message,
+            proof_of_evidence=proof_of_evidence,
+        )
+        messages.success(request, f"Your query has been raised successfully. Query ID: {query.query_id}")
+        return redirect("raise_query")
+
+    return render(request, "nk_raise_query.html")
+
+
+Manager auth and helper code added:
+
+def AdminManagerRole(user):
+    return user.is_active and user.is_staff
+
+
+def manager_login(request):
+    if request.user.is_authenticated and request.user.is_staff:
+        return redirect("manager_dashboard")
+
+    next_url = request.GET.get("next") or request.POST.get("next") or "manager_dashboard"
+
+    if request.method == "POST":
+        username = request.POST.get("username", "").strip()
+        password = request.POST.get("password", "")
+        user = authenticate(request, username=username, password=password)
+
+        if user and user.is_active and user.is_staff:
+            login(request, user)
+            return redirect(next_url)
+
+        messages.error(request, "Invalid manager login details.")
+
+    return render(request, "manager/login.html", {"next": next_url})
+
+
+def manager_logout(request):
+    logout(request)
+    return redirect("manager_login")
+
+
+def apply_date_filters(queryset, request, date_field="created_at"):
+    start_date = parse_date(request.GET.get("start_date") or "")
+    end_date = parse_date(request.GET.get("end_date") or "")
+
+    if start_date:
+        queryset = queryset.filter(**{f"{date_field}__date__gte": start_date})
+    if end_date:
+        queryset = queryset.filter(**{f"{date_field}__date__lte": end_date})
+
+    return queryset
+
+
+def paginate_items(request, queryset, per_page=15):
+    page = request.GET.get("page", 1)
+    paginator = Paginator(queryset, per_page)
+    return paginator.get_page(page)
+
+
+def filter_profiles(request, queryset):
+    queryset = apply_date_filters(queryset, request, "created_at")
+    contact_no = (request.GET.get("contact_no") or "").strip()
+    payment_id = (request.GET.get("payment_id") or "").strip()
+    public_username = (request.GET.get("public_username") or "").strip()
+
+    if contact_no:
+        queryset = queryset.filter(phone__icontains=contact_no)
+    if payment_id:
+        queryset = queryset.filter(razorpay_payment_id__icontains=payment_id)
+    if public_username:
+        queryset = queryset.filter(public_username__icontains=public_username)
+
+    return queryset.order_by("-created_at")
+
+
+Manager dashboard view added:
+
+@user_passes_test(AdminManagerRole, login_url="/manager/login/")
+def manager_dashboard(request):
+    total_profiles = UserProfile.objects.count()
+    completed_profiles = UserProfile.objects.filter(payment_status=True).count()
+    pending_profiles = UserProfile.objects.filter(payment_status=False).count()
+    total_queries = CustomerQuery.objects.count()
+    promo_usage_amount = PromoCodeUsage.objects.aggregate(total=Sum("amount")).get("total") or Decimal("0")
+    completed_amount = Decimal(completed_profiles) * Decimal(str(settings.REGISTRATION_FEE))
+    pending_amount = Decimal(pending_profiles) * Decimal(str(settings.REGISTRATION_FEE))
+
+    contexts = {
+        "active_tab": "dashboard",
+        "total_profiles": total_profiles,
+        "completed_profiles": completed_profiles,
+        "pending_profiles": pending_profiles,
+        "total_queries": total_queries,
+        "completed_amount": completed_amount,
+        "pending_amount": pending_amount,
+        "promo_usage_amount": promo_usage_amount,
+        "recent_queries": CustomerQuery.objects.all()[:5],
+        "recent_completed": UserProfile.objects.filter(payment_status=True).order_by("-created_at")[:5],
+    }
+    return render(request, "manager/dashboard.html", contexts)
+
+
+Completed page view added:
+
+@user_passes_test(AdminManagerRole, login_url="/manager/login/")
+def manager_completed(request):
+    profiles = filter_profiles(request, UserProfile.objects.filter(payment_status=True))
+    contexts = {
+        "active_tab": "completed",
+        "title": "Completed",
+        "is_completed": True,
+        "page_items": paginate_items(request, profiles),
+        "REGISTRATION_FEE": settings.REGISTRATION_FEE,
+    }
+    return render(request, "manager/profiles.html", contexts)
+
+
+Pending page view added:
+
+@user_passes_test(AdminManagerRole, login_url="/manager/login/")
+def manager_pending(request):
+    profiles = filter_profiles(request, UserProfile.objects.filter(payment_status=False))
+    contexts = {
+        "active_tab": "pending",
+        "title": "Pending",
+        "is_pending": True,
+        "page_items": paginate_items(request, profiles),
+        "REGISTRATION_FEE": settings.REGISTRATION_FEE,
+    }
+    return render(request, "manager/profiles.html", contexts)
+
+
+Queries page view added:
+
+@user_passes_test(AdminManagerRole, login_url="/manager/login/")
+def manager_queries(request):
+    if request.method == "POST":
+        query_id = request.POST.get("query_id")
+        status = request.POST.get("status")
+        if status in dict(CustomerQuery.STATUS_CHOICES):
+            CustomerQuery.objects.filter(id=query_id).update(status=status)
+            messages.success(request, "Query status updated.")
+        return redirect("manager_queries")
+
+    queries = CustomerQuery.objects.all()
+    queries = apply_date_filters(queries, request, "query_date")
+    contact_no = (request.GET.get("contact_no") or "").strip()
+    status = (request.GET.get("status") or "").strip()
+    query_type = (request.GET.get("query_type") or "").strip()
+
+    if contact_no:
+        queries = queries.filter(contact_no__icontains=contact_no)
+    if status:
+        queries = queries.filter(status=status)
+    if query_type:
+        queries = queries.filter(query_type=query_type)
+
+    contexts = {
+        "active_tab": "queries",
+        "page_items": paginate_items(request, queries),
+        "status_choices": CustomerQuery.STATUS_CHOICES,
+        "query_type_choices": CustomerQuery.QUERY_TYPE_CHOICES,
+    }
+    return render(request, "manager/queries.html", contexts)
+
+
+Promo datetime helper added:
+
+def parse_manager_datetime(value):
+    if not value:
+        return None
+    parsed = parse_datetime(value)
+    if parsed and timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed)
+    return parsed
+
+
+Promo code add/edit view added:
+
+@user_passes_test(AdminManagerRole, login_url="/manager/login/")
+def manager_promo_codes(request, promo_id=None):
+    promo = PromoCode.objects.filter(id=promo_id).first() if promo_id else None
+
+    if request.method == "POST":
+        code = (request.POST.get("code") or "").strip().upper()
+        razorpay_offer_id = (request.POST.get("razorpay_offer_id") or "").strip()
+        discount_type = request.POST.get("discount_type") or PromoCode.DISCOUNT_FLAT
+        discount_value = Decimal(request.POST.get("discount_value") or "0")
+        max_discount_amount = request.POST.get("max_discount_amount") or None
+        minimum_order_amount = Decimal(request.POST.get("minimum_order_amount") or "0")
+        max_uses_total = request.POST.get("max_uses_total") or None
+        max_uses_per_user = request.POST.get("max_uses_per_user") or 1
+        is_active = request.POST.get("is_active") == "on"
+
+        if not promo:
+            promo = PromoCode()
+
+        promo.code = code
+        promo.razorpay_offer_id = razorpay_offer_id
+        promo.discount_type = discount_type
+        promo.discount_value = discount_value
+        promo.max_discount_amount = Decimal(max_discount_amount) if max_discount_amount else None
+        promo.minimum_order_amount = minimum_order_amount
+        promo.max_uses_total = int(max_uses_total) if max_uses_total else None
+        promo.max_uses_per_user = int(max_uses_per_user)
+        promo.valid_from = parse_manager_datetime(request.POST.get("valid_from"))
+        promo.valid_until = parse_manager_datetime(request.POST.get("valid_until"))
+        promo.is_active = is_active
+        promo.save()
+        messages.success(request, "Promo code saved successfully.")
+        return redirect("manager_promo_codes")
+
+    contexts = {
+        "active_tab": "promo_codes",
+        "promo": promo,
+        "promo_codes": PromoCode.objects.all(),
+        "discount_type_choices": PromoCode.DISCOUNT_TYPE_CHOICES,
+    }
+    return render(request, "manager/promo_codes.html", contexts)
+
+
+Promo usage view added:
+
+@user_passes_test(AdminManagerRole, login_url="/manager/login/")
+def manager_promo_usage(request):
+    usages = PromoCodeUsage.objects.select_related("promo_code", "profile").all()
+    usages = apply_date_filters(usages, request, "used_at")
+    code = (request.GET.get("code") or "").strip()
+    payment_id = (request.GET.get("payment_id") or "").strip()
+    order_id = (request.GET.get("order_id") or "").strip()
+
+    if code:
+        usages = usages.filter(promo_code__code__icontains=code)
+    if payment_id:
+        usages = usages.filter(razorpay_payment_id__icontains=payment_id)
+    if order_id:
+        usages = usages.filter(razorpay_order_id__icontains=order_id)
+
+    contexts = {
+        "active_tab": "promo_usage",
+        "page_items": paginate_items(request, usages),
+    }
+    return render(request, "manager/promo_usage.html", contexts)
+
+
+5. FILE: cardapp\migrations\0008_customerquery.py
+--------------------------------------------------
+Full file added:
+
+# Generated by Django 5.2.6 on 2026-05-10
+
+from django.db import migrations, models
+
+
+class Migration(migrations.Migration):
+
+    dependencies = [
+        ("cardapp", "0007_promocode_promocodeusage"),
+    ]
+
+    operations = [
+        migrations.CreateModel(
+            name="CustomerQuery",
+            fields=[
+                ("id", models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name="ID")),
+                ("query_id", models.CharField(blank=True, max_length=20, unique=True)),
+                ("name", models.CharField(blank=True, max_length=100, null=True)),
+                ("contact_no", models.CharField(max_length=15)),
+                ("query_type", models.CharField(choices=[("payment", "Payment"), ("card_update", "Card Update"), ("login_otp", "Login / OTP"), ("cancellation", "Cancellation / Refund"), ("other", "Other")], default="payment", max_length=30)),
+                ("message", models.TextField(blank=True, null=True)),
+                ("proof_of_evidence", models.FileField(blank=True, null=True, upload_to="query_evidence/")),
+                ("status", models.CharField(choices=[("pending", "Pending"), ("in_process", "In Process"), ("resolved", "Resolved"), ("closed", "Closed")], default="pending", max_length=20)),
+                ("query_date", models.DateTimeField(auto_now_add=True)),
+                ("updated_at", models.DateTimeField(auto_now=True)),
+            ],
+            options={
+                "verbose_name": "Customer Query",
+                "verbose_name_plural": "Customer Queries",
+                "ordering": ["-query_date"],
+            },
+        ),
+    ]
+
+
+6. FILE: cardapp\templates\index.html
+-------------------------------------
+Code added in sidebar menu:
+
+<li><a href="{% url 'raise_query' %}"> <i class="fa fa-angle-right"></i> Raise Query</a></li>
+
+Code added in footer link area:
+
+<a href="{% url 'raise_query' %}">Raise Query</a>
+
+
+7. FILE: cardapp\templates\nk_Subscription.html
+------------------------------------------------
+Code added in sidebar menu:
+
+<li><a href="{% url 'raise_query' %}"> <i class="fa fa-angle-right"></i> Raise Query</a></li>
+
+Code added in footer link area:
+
+<a href="{% url 'raise_query' %}">Raise Query</a>
+
+
+8. FILE: cardapp\templates\nk_raise_query.html
+-----------------------------------------------
+Full file added:
+
+<!DOCTYPE html>
+{% load static %}
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NexoKard :: Raise Query</title>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap"
+        rel="stylesheet">
+    <link rel="stylesheet" href="{% static 'css/icg-index.css' %}">
+    <link rel="stylesheet" href="{% static 'css/infitheme.css' %}">
+    <link rel="stylesheet" href="{% static 'css/icg-popupMaster.css' %}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet">
+    <style>
+        .query-wrapper {
+            max-width: 780px;
+            margin: 0 auto;
+            padding: 38px 18px;
+        }
+        .query-box {
+            background: #ffffff;
+            border: 1px solid #eeeeee;
+            box-shadow: 0 10px 35px rgba(0, 0, 0, 0.08);
+            padding: 30px;
+        }
+        .query-box h1 {
+            color: #222222;
+            font-size: 34px;
+            margin: 0 0 10px;
+            text-align: center;
+        }
+        .query-box p {
+            color: #666666;
+            text-align: center;
+            margin: 0 0 24px;
+        }
+        .query-form input,
+        .query-form select,
+        .query-form textarea {
+            width: 100%;
+            border: 1px solid #dddddd;
+            padding: 14px;
+            margin-bottom: 16px;
+            font-family: Poppins, sans-serif;
+            font-size: 15px;
+            box-sizing: border-box;
+        }
+        .query-form textarea {
+            min-height: 130px;
+            resize: vertical;
+        }
+        .query-form button {
+            width: 100%;
+            border: 0;
+            background: #e30613;
+            color: #ffffff;
+            padding: 14px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .query-message {
+            text-align: center;
+            padding: 12px;
+            margin-bottom: 18px;
+            background: #f6f6f6;
+            color: #222222;
+        }
+        @media (max-width: 600px) {
+            .query-box {
+                padding: 22px 16px;
+            }
+            .query-box h1 {
+                font-size: 28px;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <input type="checkbox" id="menu-toggle">
+    <div class="overlay" onclick="document.getElementById('menu-toggle').checked = false;"></div>
+
+    <header>
+        <div class="NC-logo">
+            <a href="/">
+                <img src="{% static 'images/NC_Logo_White.png' %}">
+            </a>
+        </div>
+        <label for="menu-toggle" class="menu-icon">
+            &#9776;
+        </label>
+    </header>
+    <div class="sidebar">
+        <label for="menu-toggle" class="close-btn">
+            &times;
+        </label>
+        <ul>
+            <li><a href="/"> <i class="fa fa-angle-right"></i> Home</a></li>
+            <li><a href="/privacy-policy/" target="_blank"> <i class="fa fa-angle-right"></i> Privacy Policy</a></li>
+            <li><a href="/Terms-view/" target="_blank"><i class="fa fa-angle-right"></i> Terms and Conditions</a></li>
+            <li><a href="/refund_policy/" target="_blank"> <i class="fa fa-angle-right"></i> Refund Policy</a></li>
+            <li><a href="/subscription-policy/" target="_blank"> <i class="fa fa-angle-right"></i> Subscription</a></li>
+            <li><a href="{% url 'raise_query' %}"> <i class="fa fa-angle-right"></i> Raise Query</a></li>
+        </ul>
+    </div>
+
+    <section class="NC-Page-Container">
+        <div class="query-wrapper">
+            <div class="query-box">
+                <h1>Raise Query</h1>
+                <p>Share your payment, card, login, cancellation, or refund issue with proof if available.</p>
+
+                {% if messages %}
+                    {% for message in messages %}
+                        <div class="query-message">{{ message }}</div>
+                    {% endfor %}
+                {% endif %}
+
+                <form class="query-form" method="post" enctype="multipart/form-data">
+                    {% csrf_token %}
+                    <input type="text" name="name" placeholder="Enter your Name">
+                    <input type="tel" name="contact_no" placeholder="Enter Contact Number" maxlength="15" required>
+                    <select name="query_type" required>
+                        <option value="payment">Payment</option>
+                        <option value="card_update">Card Update</option>
+                        <option value="login_otp">Login / OTP</option>
+                        <option value="cancellation">Cancellation / Refund</option>
+                        <option value="other">Other</option>
+                    </select>
+                    <textarea name="message" placeholder="Write your query"></textarea>
+                    <input type="file" name="proof_of_evidence">
+                    <button type="submit">SUBMIT QUERY</button>
+                </form>
+            </div>
+        </div>
+    </section>
+
+    <footer class="footer">
+        <div class="footer-top">
+            <div class="footer-left">
+                <h2>Corporate Office</h2>
+                <i class="fa-solid fa-location-dot" style="color: rgb(239, 7, 7);"></i>
+                <p>Plot No 40, Greenpark avenue kompally, Near Suchitra Circle, <br> Hyderabad - 500 055 Telangana,
+                    INDIA.</p><br><br>
+                <i aria-hidden="true" class="fas fa-phone-volume" style="color: rgb(239, 7, 7);"></i>
+                <p>+91 8308 8308 75</p>
+                <i aria-hidden="true" class="far fa-envelope" style="padding-left: 30px;color: rgb(239, 7, 7);"></i>
+                <p>info@pixelstat.com</p>
+            </div>
+            <div class="footer-right">
+                <div class="link">
+                    <a href="{% url 'privacy_policy' %}">Privacy Policy</a> |
+                    <a href="{% url 'terms_view' %}">Terms and Conditions</a> |
+                    <a href="{% url 'refund_policy' %}">Refund Policy</a> |
+                    <a href="{% url 'subscription_policy' %}">Subscription</a> |
+                    <a href="{% url 'raise_query' %}">Raise Query</a>
+                </div>
+                <div class="img_div">
+                    <img src="{% static 'images/download.gif' %}" alt="Small Image">
+                </div>
+            </div>
+        </div>
+    </footer>
+
+    <div class="nk_cr">
+        <p>
+            Copyright (c) 2026 All Rights Reserved. Powered by <a href="https://pixelstat.com/">PIXELSTAT</a>
+        </p>
+    </div>
+</body>
+
+</html>
+
+
+9. FILE: cardapp\templates\manager\base_admin.html
+---------------------------------------------------
+Full file added:
+
+<!DOCTYPE html>
+{% load static %}
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NexoKard Manager</title>
+    <link rel="icon" type="image/png" href="{% static 'images/NC_Logo_black.png' %}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            background: #f4f6f9;
+            color: #1f2933;
+            font-family: Arial, Helvetica, sans-serif;
+        }
+        .Admin-Header {
+            align-items: center;
+            background: #111827;
+            display: flex;
+            gap: 18px;
+            justify-content: space-between;
+            padding: 14px 24px;
+        }
+        .Admin-Brand {
+            align-items: center;
+            color: #fff;
+            display: flex;
+            font-size: 18px;
+            font-weight: 700;
+            gap: 10px;
+            text-decoration: none;
+            white-space: nowrap;
+        }
+        .Admin-Brand img { height: 34px; width: auto; }
+        .Admin-Nav {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+        .Admin-Nav a {
+            border: 1px solid #334155;
+            color: #e5e7eb;
+            font-size: 14px;
+            padding: 9px 12px;
+            text-decoration: none;
+        }
+        .Admin-Nav a.active,
+        .Admin-Nav a:hover {
+            background: #e30613;
+            border-color: #e30613;
+            color: #fff;
+        }
+        .Breadcrumb {
+            background: #fff;
+            border-bottom: 1px solid #dfe4ea;
+            padding: 14px 24px;
+        }
+        .Breadcrumb ul {
+            display: flex;
+            gap: 8px;
+            list-style: none;
+            margin: 0;
+            padding: 0;
+        }
+        .Breadcrumb a {
+            color: #e30613;
+            font-weight: 700;
+            text-decoration: none;
+        }
+        .Master-Content-Box {
+            margin: 22px auto;
+            max-width: 1400px;
+            padding: 0 18px 30px;
+        }
+        .Search-Filter-Container {
+            background: #fff;
+            border: 1px solid #dfe4ea;
+            margin-bottom: 16px;
+            padding: 14px;
+        }
+        .Search-Filter-Container form {
+            display: grid;
+            gap: 10px;
+            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+        }
+        input, select, textarea {
+            border: 1px solid #cfd6df;
+            font: inherit;
+            padding: 10px;
+            width: 100%;
+        }
+        textarea { min-height: 80px; resize: vertical; }
+        .Admin-Btn {
+            align-items: center;
+            background: #e30613;
+            border: 0;
+            color: #fff;
+            cursor: pointer;
+            display: inline-flex;
+            font-weight: 700;
+            gap: 6px;
+            justify-content: center;
+            min-height: 40px;
+            padding: 10px 14px;
+            text-decoration: none;
+        }
+        .Admin-Btn.secondary { background: #111827; }
+        .Stats-Grid {
+            display: grid;
+            gap: 14px;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            margin-bottom: 18px;
+        }
+        .Stat-Box {
+            background: #fff;
+            border-left: 4px solid #e30613;
+            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.06);
+            padding: 18px;
+        }
+        .Stat-Box span {
+            color: #64748b;
+            display: block;
+            font-size: 13px;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+        }
+        .Stat-Box strong {
+            color: #111827;
+            display: block;
+            font-size: 28px;
+        }
+        .Panel {
+            background: #fff;
+            border: 1px solid #dfe4ea;
+            margin-bottom: 18px;
+            overflow-x: auto;
+            padding: 16px;
+        }
+        .Panel h2 {
+            font-size: 20px;
+            margin: 0 0 14px;
+        }
+        table {
+            border-collapse: collapse;
+            min-width: 900px;
+            width: 100%;
+        }
+        th, td {
+            border: 1px solid #e5e7eb;
+            font-size: 14px;
+            padding: 10px;
+            text-align: left;
+            vertical-align: top;
+        }
+        th {
+            background: #111827;
+            color: #fff;
+            white-space: nowrap;
+        }
+        .Status {
+            display: inline-block;
+            font-size: 12px;
+            font-weight: 700;
+            padding: 5px 8px;
+            text-transform: uppercase;
+        }
+        .Status.success, .Status.resolved { background: #dcfce7; color: #166534; }
+        .Status.pending { background: #fef3c7; color: #92400e; }
+        .Status.failed, .Status.closed { background: #fee2e2; color: #991b1b; }
+        .Status.in_process { background: #dbeafe; color: #1e40af; }
+        .Pagination {
+            display: flex;
+            gap: 8px;
+            justify-content: center;
+            margin-top: 16px;
+        }
+        .Pagination a, .Pagination span {
+            background: #fff;
+            border: 1px solid #cfd6df;
+            color: #111827;
+            padding: 8px 11px;
+            text-decoration: none;
+        }
+        .Admin-Messages {
+            margin-bottom: 14px;
+        }
+        .Admin-Messages div {
+            background: #dcfce7;
+            border: 1px solid #86efac;
+            color: #166534;
+            padding: 10px;
+        }
+        @media (max-width: 800px) {
+            .Admin-Header { align-items: flex-start; flex-direction: column; }
+            .Admin-Nav { justify-content: flex-start; }
+        }
+    </style>
+</head>
+<body>
+    <header class="Admin-Header">
+        <a class="Admin-Brand" href="{% url 'manager_dashboard' %}">
+            <img src="{% static 'images/NC_Logo_White.png' %}" alt="NexoKard">
+            NexoKard
+        </a>
+        <nav class="Admin-Nav">
+            <a class="{% if active_tab == 'dashboard' %}active{% endif %}" href="{% url 'manager_dashboard' %}">Dashboard</a>
+            <a class="{% if active_tab == 'completed' %}active{% endif %}" href="{% url 'manager_completed' %}">Completed</a>
+            <a class="{% if active_tab == 'pending' %}active{% endif %}" href="{% url 'manager_pending' %}">Pending</a>
+            <a class="{% if active_tab == 'queries' %}active{% endif %}" href="{% url 'manager_queries' %}">Queries</a>
+            <a class="{% if active_tab == 'promo_codes' %}active{% endif %}" href="{% url 'manager_promo_codes' %}">Promo Code Add</a>
+            <a class="{% if active_tab == 'promo_usage' %}active{% endif %}" href="{% url 'manager_promo_usage' %}">Promo Code Usage</a>
+            <a href="/pixelmaster/" target="_blank">Django Admin</a>
+            <a href="{% url 'manager_logout' %}">Logout</a>
+        </nav>
+    </header>
+
+    <div class="Breadcrumb">
+        <ul>
+            <li><a href="{% url 'manager_dashboard' %}">Dashboard</a></li>
+            <li>/</li>
+            <li>{% block breadcrumb %}Dashboard{% endblock %}</li>
+        </ul>
+    </div>
+
+    <main class="Master-Content-Box">
+        {% if messages %}
+            <div class="Admin-Messages">
+                {% for message in messages %}
+                    <div>{{ message }}</div>
+                {% endfor %}
+            </div>
+        {% endif %}
+        {% block content %}{% endblock %}
+    </main>
+</body>
+</html>
+
+
+10. FILE: cardapp\templates\manager\dashboard.html
+---------------------------------------------------
+Full file added:
+
+{% extends "manager/base_admin.html" %}
+
+{% block breadcrumb %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="Stats-Grid">
+    <div class="Stat-Box">
+        <span>Total Profiles</span>
+        <strong>{{ total_profiles }}</strong>
+    </div>
+    <div class="Stat-Box">
+        <span>Completed</span>
+        <strong>{{ completed_profiles }}</strong>
+    </div>
+    <div class="Stat-Box">
+        <span>Pending</span>
+        <strong>{{ pending_profiles }}</strong>
+    </div>
+    <div class="Stat-Box">
+        <span>Total Queries</span>
+        <strong>{{ total_queries }}</strong>
+    </div>
+    <div class="Stat-Box">
+        <span>Total Collected Amount</span>
+        <strong>Rs {{ completed_amount }}</strong>
+    </div>
+    <div class="Stat-Box">
+        <span>Amount Balance In Account</span>
+        <strong>Rs {{ pending_amount }}</strong>
+    </div>
+    <div class="Stat-Box">
+        <span>Promo Usage Amount</span>
+        <strong>Rs {{ promo_usage_amount }}</strong>
+    </div>
+</div>
+
+<div class="Panel">
+    <h2>Recent Completed Profiles</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>S.No.</th>
+                <th>Name</th>
+                <th>Mobile No.</th>
+                <th>Payment ID</th>
+                <th>Payment Status</th>
+                <th>Date</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for profile in recent_completed %}
+            <tr>
+                <td>{{ forloop.counter }}</td>
+                <td>{{ profile.full_name }}</td>
+                <td>{{ profile.phone }}</td>
+                <td>{{ profile.razorpay_payment_id|default:"-" }}</td>
+                <td><span class="Status success">Successful</span></td>
+                <td>{{ profile.created_at|date:"d M Y, h:i A" }}</td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="6">No completed profiles found.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="Panel">
+    <h2>Recent Queries</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Query ID</th>
+                <th>Contact No.</th>
+                <th>Name</th>
+                <th>Query Type</th>
+                <th>Query Date</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for query in recent_queries %}
+            <tr>
+                <td>{{ query.query_id }}</td>
+                <td>{{ query.contact_no }}</td>
+                <td>{{ query.name|default:"-" }}</td>
+                <td>{{ query.get_query_type_display }}</td>
+                <td>{{ query.query_date|date:"d M Y, h:i A" }}</td>
+                <td><span class="Status {{ query.status }}">{{ query.get_status_display }}</span></td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="6">No queries found.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+
+11. FILE: cardapp\templates\manager\profiles.html
+--------------------------------------------------
+Full file added:
+
+{% extends "manager/base_admin.html" %}
+
+{% block breadcrumb %}{{ title }}{% endblock %}
+
+{% block content %}
+<div class="Search-Filter-Container">
+    <form action="" method="get">
+        <input placeholder="Start Date" type="text" name="start_date" value="{{ request.GET.start_date }}" onfocus="this.type='date'" onblur="if(!this.value){this.type='text'}">
+        <input placeholder="End Date" type="text" name="end_date" value="{{ request.GET.end_date }}" onfocus="this.type='date'" onblur="if(!this.value){this.type='text'}">
+        <input type="number" name="contact_no" value="{{ request.GET.contact_no }}" placeholder="Contact Number">
+        <input type="text" name="public_username" value="{{ request.GET.public_username }}" placeholder="Card URL">
+        <input type="text" name="payment_id" value="{{ request.GET.payment_id }}" placeholder="Payment ID">
+        <button class="Admin-Btn" type="submit"><i class="fa fa-search"></i> Search</button>
+    </form>
+</div>
+
+<div class="Panel">
+    <h2>{{ title }} Profiles</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>S.No.</th>
+                <th>Transaction ID</th>
+                <th>Order ID</th>
+                <th>Payment ID</th>
+                <th>Cust. Name</th>
+                <th>Mobile No.</th>
+                <th>Amount Paid</th>
+                <th>Discount Applied</th>
+                <th>Final Paid Amount</th>
+                <th>Payment Mode</th>
+                <th>Payment Status</th>
+                <th>Payment Date & Time</th>
+                <th>Invoice / Receipt</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for profile in page_items %}
+            <tr>
+                <td>{{ forloop.counter }}</td>
+                <td>TXN{{ profile.id }}</td>
+                <td>-</td>
+                <td>{{ profile.razorpay_payment_id|default:"-" }}</td>
+                <td>{{ profile.full_name }}</td>
+                <td>{{ profile.phone }}</td>
+                <td>Rs {{ REGISTRATION_FEE|default:"1000" }}</td>
+                <td>
+                    {% if profile.promo_usages.first %}
+                        {{ profile.promo_usages.first.promo_code.code }}
+                    {% else %}
+                        -
+                    {% endif %}
+                </td>
+                <td>
+                    {% if profile.promo_usages.first %}
+                        Rs {{ profile.promo_usages.first.amount }}
+                    {% else %}
+                        Rs {{ REGISTRATION_FEE|default:"1000" }}
+                    {% endif %}
+                </td>
+                <td>Razorpay</td>
+                <td>
+                    {% if profile.payment_status %}
+                        <span class="Status success">Successful</span>
+                    {% else %}
+                        <span class="Status pending">Pending</span>
+                    {% endif %}
+                </td>
+                <td>{{ profile.created_at|date:"d M Y, h:i A" }}</td>
+                <td>
+                    {% if profile.public_username %}
+                        <a class="Admin-Btn secondary" href="{% url 'view_business_card' profile.public_username %}" target="_blank">View</a>
+                    {% else %}
+                        -
+                    {% endif %}
+                </td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="13">No records found.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div class="Pagination">
+        {% if page_items.has_previous %}
+            <a href="?page={{ page_items.previous_page_number }}&start_date={{ request.GET.start_date }}&end_date={{ request.GET.end_date }}&contact_no={{ request.GET.contact_no }}&public_username={{ request.GET.public_username }}&payment_id={{ request.GET.payment_id }}">Prev</a>
+        {% endif %}
+        <span>Page {{ page_items.number }} of {{ page_items.paginator.num_pages }}</span>
+        {% if page_items.has_next %}
+            <a href="?page={{ page_items.next_page_number }}&start_date={{ request.GET.start_date }}&end_date={{ request.GET.end_date }}&contact_no={{ request.GET.contact_no }}&public_username={{ request.GET.public_username }}&payment_id={{ request.GET.payment_id }}">Next</a>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+
+12. FILE: cardapp\templates\manager\queries.html
+-------------------------------------------------
+Full file added:
+
+{% extends "manager/base_admin.html" %}
+
+{% block breadcrumb %}Queries{% endblock %}
+
+{% block content %}
+<div class="Search-Filter-Container">
+    <form action="" method="get">
+        <input placeholder="Start Date" type="text" name="start_date" value="{{ request.GET.start_date }}" onfocus="this.type='date'" onblur="if(!this.value){this.type='text'}">
+        <input placeholder="End Date" type="text" name="end_date" value="{{ request.GET.end_date }}" onfocus="this.type='date'" onblur="if(!this.value){this.type='text'}">
+        <input type="number" name="contact_no" value="{{ request.GET.contact_no }}" placeholder="Contact Number">
+        <select name="query_type">
+            <option value="">Query Type</option>
+            {% for value, label in query_type_choices %}
+                <option value="{{ value }}" {% if request.GET.query_type == value %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+        <select name="status">
+            <option value="">Status</option>
+            {% for value, label in status_choices %}
+                <option value="{{ value }}" {% if request.GET.status == value %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+        <button class="Admin-Btn" type="submit"><i class="fa fa-search"></i> Search</button>
+    </form>
+</div>
+
+<div class="Panel">
+    <h2>Queries</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Query ID</th>
+                <th>Contact No.</th>
+                <th>Name</th>
+                <th>Date</th>
+                <th>Type</th>
+                <th>Proof / Evidence</th>
+                <th>Message</th>
+                <th>Status</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for query in page_items %}
+            <tr>
+                <td>{{ query.query_id }}</td>
+                <td>{{ query.contact_no }}</td>
+                <td>{{ query.name|default:"-" }}</td>
+                <td>{{ query.query_date|date:"d M Y, h:i A" }}</td>
+                <td>{{ query.get_query_type_display }}</td>
+                <td>
+                    {% if query.proof_of_evidence %}
+                        <a class="Admin-Btn secondary" href="{{ query.proof_of_evidence.url }}" target="_blank">Open</a>
+                    {% else %}
+                        -
+                    {% endif %}
+                </td>
+                <td>{{ query.message|default:"-" }}</td>
+                <td><span class="Status {{ query.status }}">{{ query.get_status_display }}</span></td>
+                <td>
+                    <form method="post">
+                        {% csrf_token %}
+                        <input type="hidden" name="query_id" value="{{ query.id }}">
+                        <select name="status">
+                            {% for value, label in status_choices %}
+                                <option value="{{ value }}" {% if query.status == value %}selected{% endif %}>{{ label }}</option>
+                            {% endfor %}
+                        </select>
+                        <button class="Admin-Btn" type="submit">Update</button>
+                    </form>
+                </td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="9">No queries found.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div class="Pagination">
+        {% if page_items.has_previous %}
+            <a href="?page={{ page_items.previous_page_number }}&start_date={{ request.GET.start_date }}&end_date={{ request.GET.end_date }}&contact_no={{ request.GET.contact_no }}&query_type={{ request.GET.query_type }}&status={{ request.GET.status }}">Prev</a>
+        {% endif %}
+        <span>Page {{ page_items.number }} of {{ page_items.paginator.num_pages }}</span>
+        {% if page_items.has_next %}
+            <a href="?page={{ page_items.next_page_number }}&start_date={{ request.GET.start_date }}&end_date={{ request.GET.end_date }}&contact_no={{ request.GET.contact_no }}&query_type={{ request.GET.query_type }}&status={{ request.GET.status }}">Next</a>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+
+13. FILE: cardapp\templates\manager\promo_codes.html
+-----------------------------------------------------
+Full file added:
+
+{% extends "manager/base_admin.html" %}
+
+{% block breadcrumb %}Promo Code Add{% endblock %}
+
+{% block content %}
+<div class="Panel">
+    <h2>{% if promo %}Edit Promo Code{% else %}Add Promo Code{% endif %}</h2>
+    <form method="post">
+        {% csrf_token %}
+        <div class="Search-Filter-Container">
+            <div style="display:grid; gap:10px; grid-template-columns:repeat(auto-fit, minmax(190px, 1fr));">
+                <input type="text" name="code" value="{{ promo.code|default:'' }}" placeholder="Code" required>
+                <input type="text" name="razorpay_offer_id" value="{{ promo.razorpay_offer_id|default:'' }}" placeholder="Razorpay Offer ID" required>
+                <select name="discount_type" required>
+                    {% for value, label in discount_type_choices %}
+                        <option value="{{ value }}" {% if promo.discount_type == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+                <input type="number" step="0.01" name="discount_value" value="{{ promo.discount_value|default:'' }}" placeholder="Discount Value" required>
+                <input type="number" step="0.01" name="max_discount_amount" value="{{ promo.max_discount_amount|default:'' }}" placeholder="Max Discount Amount">
+                <input type="number" step="0.01" name="minimum_order_amount" value="{{ promo.minimum_order_amount|default:'0' }}" placeholder="Minimum Order Amount">
+                <input type="number" name="max_uses_total" value="{{ promo.max_uses_total|default:'' }}" placeholder="Max Uses Total">
+                <input type="number" name="max_uses_per_user" value="{{ promo.max_uses_per_user|default:'1' }}" placeholder="Max Uses Per User">
+                <input type="datetime-local" name="valid_from" value="{{ promo.valid_from|date:'Y-m-d\\TH:i' }}" placeholder="Valid From">
+                <input type="datetime-local" name="valid_until" value="{{ promo.valid_until|date:'Y-m-d\\TH:i' }}" placeholder="Valid Until">
+                <label style="align-items:center; display:flex; gap:8px;">
+                    <input type="checkbox" name="is_active" style="width:auto;" {% if promo.is_active or not promo %}checked{% endif %}>
+                    Active
+                </label>
+                <button class="Admin-Btn" type="submit"><i class="fa fa-save"></i> Save Promo Code</button>
+            </div>
+        </div>
+    </form>
+</div>
+
+<div class="Panel">
+    <h2>Promo Codes</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Code</th>
+                <th>Razorpay Offer ID</th>
+                <th>Discount Type</th>
+                <th>Discount Value</th>
+                <th>Max Per User</th>
+                <th>Status</th>
+                <th>Valid From</th>
+                <th>Valid Until</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for code in promo_codes %}
+            <tr>
+                <td>{{ code.code }}</td>
+                <td>{{ code.razorpay_offer_id }}</td>
+                <td>{{ code.get_discount_type_display }}</td>
+                <td>{{ code.discount_value }}</td>
+                <td>{{ code.max_uses_per_user }}</td>
+                <td>
+                    {% if code.is_active %}
+                        <span class="Status success">Active</span>
+                    {% else %}
+                        <span class="Status closed">Inactive</span>
+                    {% endif %}
+                </td>
+                <td>{{ code.valid_from|date:"d M Y, h:i A"|default:"-" }}</td>
+                <td>{{ code.valid_until|date:"d M Y, h:i A"|default:"-" }}</td>
+                <td><a class="Admin-Btn secondary" href="{% url 'manager_promo_code_edit' code.id %}">Edit</a></td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="9">No promo codes found.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+
+14. FILE: cardapp\templates\manager\promo_usage.html
+-----------------------------------------------------
+Full file added:
+
+{% extends "manager/base_admin.html" %}
+
+{% block breadcrumb %}Promo Code Usage{% endblock %}
+
+{% block content %}
+<div class="Search-Filter-Container">
+    <form action="" method="get">
+        <input placeholder="Start Date" type="text" name="start_date" value="{{ request.GET.start_date }}" onfocus="this.type='date'" onblur="if(!this.value){this.type='text'}">
+        <input placeholder="End Date" type="text" name="end_date" value="{{ request.GET.end_date }}" onfocus="this.type='date'" onblur="if(!this.value){this.type='text'}">
+        <input type="text" name="code" value="{{ request.GET.code }}" placeholder="Promo Code">
+        <input type="text" name="order_id" value="{{ request.GET.order_id }}" placeholder="Order ID">
+        <input type="text" name="payment_id" value="{{ request.GET.payment_id }}" placeholder="Payment ID">
+        <button class="Admin-Btn" type="submit"><i class="fa fa-search"></i> Search</button>
+    </form>
+</div>
+
+<div class="Panel">
+    <h2>Promo Code Usage</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>S.No.</th>
+                <th>Code</th>
+                <th>Customer Name</th>
+                <th>Contact No.</th>
+                <th>Razorpay Offer ID</th>
+                <th>Order ID</th>
+                <th>Payment ID</th>
+                <th>Amount</th>
+                <th>Used At</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for usage in page_items %}
+            <tr>
+                <td>{{ forloop.counter }}</td>
+                <td>{{ usage.promo_code.code }}</td>
+                <td>{{ usage.profile.full_name }}</td>
+                <td>{{ usage.profile.phone }}</td>
+                <td>{{ usage.razorpay_offer_id }}</td>
+                <td>{{ usage.razorpay_order_id }}</td>
+                <td>{{ usage.razorpay_payment_id }}</td>
+                <td>Rs {{ usage.amount }}</td>
+                <td>{{ usage.used_at|date:"d M Y, h:i A" }}</td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="9">No promo usage found.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div class="Pagination">
+        {% if page_items.has_previous %}
+            <a href="?page={{ page_items.previous_page_number }}&start_date={{ request.GET.start_date }}&end_date={{ request.GET.end_date }}&code={{ request.GET.code }}&order_id={{ request.GET.order_id }}&payment_id={{ request.GET.payment_id }}">Prev</a>
+        {% endif %}
+        <span>Page {{ page_items.number }} of {{ page_items.paginator.num_pages }}</span>
+        {% if page_items.has_next %}
+            <a href="?page={{ page_items.next_page_number }}&start_date={{ request.GET.start_date }}&end_date={{ request.GET.end_date }}&code={{ request.GET.code }}&order_id={{ request.GET.order_id }}&payment_id={{ request.GET.payment_id }}">Next</a>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+
+15. FILE: cardapp\templates\manager\login.html
+-----------------------------------------------
+Full file added:
+
+<!DOCTYPE html>
+{% load static %}
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NexoKard Manager Login</title>
+    <link rel="icon" type="image/png" href="{% static 'images/NC_Logo_black.png' %}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            align-items: center;
+            background: #f4f6f9;
+            display: flex;
+            font-family: Arial, Helvetica, sans-serif;
+            justify-content: center;
+            margin: 0;
+            min-height: 100vh;
+            padding: 18px;
+        }
+        .Login-Box {
+            background: #ffffff;
+            border: 1px solid #dfe4ea;
+            box-shadow: 0 14px 40px rgba(15, 23, 42, 0.12);
+            max-width: 420px;
+            padding: 30px;
+            width: 100%;
+        }
+        .Login-Logo {
+            background: #111827;
+            margin: -30px -30px 26px;
+            padding: 22px;
+            text-align: center;
+        }
+        .Login-Logo img {
+            max-height: 52px;
+            max-width: 210px;
+        }
+        h1 {
+            color: #111827;
+            font-size: 26px;
+            margin: 0 0 6px;
+            text-align: center;
+        }
+        p {
+            color: #64748b;
+            margin: 0 0 24px;
+            text-align: center;
+        }
+        label {
+            color: #334155;
+            display: block;
+            font-size: 14px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+        input {
+            border: 1px solid #cfd6df;
+            font: inherit;
+            margin-bottom: 16px;
+            padding: 12px;
+            width: 100%;
+        }
+        button {
+            background: #e30613;
+            border: 0;
+            color: #ffffff;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 700;
+            min-height: 44px;
+            width: 100%;
+        }
+        .Login-Message {
+            background: #fee2e2;
+            border: 1px solid #fecaca;
+            color: #991b1b;
+            margin-bottom: 16px;
+            padding: 10px;
+            text-align: center;
+        }
+        .Back-Link {
+            display: block;
+            color: #111827;
+            font-size: 14px;
+            margin-top: 18px;
+            text-align: center;
+            text-decoration: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="Login-Box">
+        <div class="Login-Logo">
+            <img src="{% static 'images/NC_Logo_White.png' %}" alt="NexoKard">
+        </div>
+        <h1>Manager Login</h1>
+        <p>Sign in to access the NexoKard manager panel.</p>
+
+        {% if messages %}
+            {% for message in messages %}
+                <div class="Login-Message">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+
+        <form method="post">
+            {% csrf_token %}
+            <input type="hidden" name="next" value="{{ next }}">
+            <label for="username">Username</label>
+            <input id="username" type="text" name="username" placeholder="Enter username" required autofocus>
+
+            <label for="password">Password</label>
+            <input id="password" type="password" name="password" placeholder="Enter password" required>
+
+            <button type="submit"><i class="fa fa-lock"></i> Login</button>
+        </form>
+        <a class="Back-Link" href="/">Back to website</a>
+    </div>
+</body>
+</html>
