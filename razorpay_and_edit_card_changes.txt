@@ -1,0 +1,839 @@
+RAZORPAY PROMO / UPI AND EDIT CARD OTP PROTECTION CHANGES
+=========================================================
+
+Use this file as a copy-paste guide for another project.
+
+IMPORTANT:
+- Copy only the snippets that your other project is missing.
+- If the other project already has the same function/model, merge the added lines instead of duplicating functions.
+- The business-hours/footer experiment is NOT included here.
+
+
+=========================================================
+1. RAZORPAY / PROMO CODE BACKEND
+=========================================================
+
+File: cardapp/views.py
+
+Required imports used by these snippets:
+
+```python
+from decimal import Decimal
+from django.conf import settings
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+
+try:
+    import razorpay
+    from razorpay.errors import SignatureVerificationError
+except ImportError:
+    razorpay = None
+
+    class SignatureVerificationError(Exception):
+        pass
+```
+
+Helper used to safely read ids:
+
+```python
+def clean_int_id(value):
+    value = str(value or "").strip()
+    return value if value.isdigit() else None
+```
+
+Helper used by Razorpay order creation:
+
+```python
+def get_active_profile(request):
+    profile_id = clean_int_id(
+        request.GET.get("profile_id")
+        or request.POST.get("profile_id")
+        or request.session.get("current_profile_id")
+    )
+
+    if not profile_id:
+        return None
+
+    return UserProfile.objects.filter(id=profile_id).first()
+```
+
+Razorpay client:
+
+```python
+razorpay_client = None
+if razorpay:
+    razorpay_client = razorpay.Client(
+        auth=(settings.API_ID, settings.API_SECRET)
+    )
+```
+
+Promo validation:
+
+```python
+def validate_promo_for_profile(code, profile, amount):
+    if not code:
+        return None, ""
+
+    normalized_code = code.strip().upper()
+    promo = PromoCode.objects.filter(code__iexact=normalized_code).first()
+
+    if not promo:
+        return None, "Invalid promo code."
+
+    is_available, message = promo.is_available_now()
+    if not is_available:
+        return None, message
+
+    if Decimal(amount) < promo.minimum_order_amount:
+        return None, f"Minimum order amount for this promo is ₹{promo.minimum_order_amount}."
+
+    used_count = PromoCodeUsage.objects.filter(
+        promo_code=promo,
+        profile=profile,
+    ).count()
+    if used_count >= promo.max_uses_per_user:
+        return None, "You have already used this promo code."
+
+    return promo, ""
+```
+
+Create Razorpay order with promo offer:
+
+```python
+def create_order(request):
+    if not razorpay_client:
+        return JsonResponse({"status": "failed", "message": "Razorpay package is not installed."}, status=500)
+
+    amount_rupees = Decimal(str(settings.REGISTRATION_FEE))
+    amount = int(amount_rupees * 100)
+    promo_code = (
+        request.GET.get("promo_code")
+        or request.POST.get("promo_code")
+        or request.session.get("applied_promo_code")
+    )
+    profile = get_active_profile(request)
+
+    if not profile or profile.payment_status:
+        request.session.pop("current_profile_id", None)
+        request.session.pop("applied_promo_code", None)
+        return JsonResponse({"status": "failed", "message": "Complete Step 1 first."}, status=400)
+
+    profile_id = str(profile.id)
+
+    order_payload = {
+        "amount": amount,
+        "currency": "INR",
+        "payment_capture": 1,
+        "receipt": f"nexokard-{profile.id}",
+        "notes": {
+            "profile_id": str(profile.id),
+            "promo_code": promo_code or "",
+        },
+    }
+
+    promo = None
+    if promo_code:
+        promo, promo_error = validate_promo_for_profile(promo_code, profile, amount_rupees)
+        if promo_error:
+            return JsonResponse({"status": "failed", "message": promo_error}, status=400)
+
+        # This connects the Razorpay Offer ID to the order.
+        order_payload["offers"] = [promo.razorpay_offer_id]
+
+    try:
+        order = razorpay_client.order.create(order_payload)
+    except Exception as e:
+        print("Razorpay order create error:", e)
+        return JsonResponse({
+            "status": "failed",
+            "message": "Unable to create Razorpay order. Please check internet/Razorpay credentials and try again.",
+        }, status=502)
+
+    request.session[f"order_profile_{order['id']}"] = profile.id
+    request.session["current_profile_id"] = profile.id
+
+    if promo and profile_id:
+        request.session[f"promo_order_{order['id']}"] = {
+            "promo_id": promo.id,
+            "profile_id": int(profile_id),
+            "amount": str(amount_rupees),
+        }
+
+    response = {
+        "order_id": order["id"],
+        "amount": amount,
+        "currency": order.get("currency", "INR"),
+        "profile_id": profile.id,
+        "key": settings.API_ID
+    }
+    if promo:
+        response.update({
+            "promo_code": promo.code,
+            "offer_id": promo.razorpay_offer_id,
+        })
+    return JsonResponse(response)
+```
+
+Validate promo before payment:
+
+```python
+def validate_promo_code(request):
+    amount_rupees = Decimal(str(settings.REGISTRATION_FEE))
+    promo_code = request.GET.get("promo_code") or request.POST.get("promo_code")
+
+    if not promo_code:
+        return JsonResponse({"status": "failed", "message": "Enter promo code."}, status=400)
+
+    profile = get_active_profile(request)
+
+    if not profile or profile.payment_status:
+        request.session.pop("current_profile_id", None)
+        request.session.pop("applied_promo_code", None)
+        return JsonResponse({"status": "failed", "message": "Complete Step 1 first."}, status=400)
+
+    promo, promo_error = validate_promo_for_profile(promo_code, profile, amount_rupees)
+    if promo_error:
+        return JsonResponse({"status": "failed", "message": promo_error}, status=400)
+
+    request.session["current_profile_id"] = profile.id
+    request.session["applied_promo_code"] = promo.code
+
+    return JsonResponse({
+        "status": "success",
+        "message": "Promo code applied.",
+        "promo_code": promo.code,
+        "offer_id": promo.razorpay_offer_id,
+        "profile_id": profile.id,
+    })
+```
+
+Verify payment and save promo usage:
+
+```python
+@csrf_exempt
+def verify_payment(request):
+    if request.method != "POST":
+        return JsonResponse({"status": "invalid"})
+    if not razorpay_client:
+        return JsonResponse({"status": "failed", "message": "Razorpay package is not installed."}, status=500)
+
+    try:
+        razorpay_client.utility.verify_payment_signature({
+            "razorpay_order_id": request.POST.get("razorpay_order_id"),
+            "razorpay_payment_id": request.POST.get("razorpay_payment_id"),
+            "razorpay_signature": request.POST.get("razorpay_signature"),
+        })
+
+        order_id = request.POST.get("razorpay_order_id")
+        payment_id = request.POST.get("razorpay_payment_id")
+        order_profile_key = f"order_profile_{order_id}"
+        profile_id = clean_int_id(request.session.get(order_profile_key))
+        if not profile_id:
+            return JsonResponse({
+                "status": "failed",
+                "message": "Payment verified, but profile session expired. Please contact support."
+            }, status=400)
+
+        request.session["current_profile_id"] = int(profile_id)
+        request.session["latest_profile_id"] = int(profile_id)
+        request.session[f"verified_payment_{payment_id}"] = int(profile_id)
+
+        promo_session_key = f"promo_order_{order_id}"
+        promo_data = request.session.get(promo_session_key)
+
+        if promo_data:
+            promo = PromoCode.objects.filter(id=promo_data.get("promo_id")).first()
+            profile = UserProfile.objects.filter(id=promo_data.get("profile_id")).first()
+
+            if promo and profile:
+                PromoCodeUsage.objects.get_or_create(
+                    promo_code=promo,
+                    profile=profile,
+                    defaults={
+                        "razorpay_offer_id": promo.razorpay_offer_id,
+                        "razorpay_order_id": order_id,
+                        "razorpay_payment_id": payment_id,
+                        "amount": Decimal(str(promo_data.get("amount", settings.REGISTRATION_FEE))),
+                    },
+                )
+
+            del request.session[promo_session_key]
+
+        if order_profile_key in request.session:
+            del request.session[order_profile_key]
+
+        return JsonResponse({"status": "success", "profile_id": profile_id})
+
+    except SignatureVerificationError:
+        return JsonResponse({"status": "failed"})
+```
+
+
+=========================================================
+2. RAZORPAY / PROMO MODELS
+=========================================================
+
+File: cardapp/models.py
+
+Add these models if the other project does not already have them:
+
+```python
+class PromoCode(models.Model):
+    DISCOUNT_FLAT = "flat"
+    DISCOUNT_PERCENT = "percent"
+    DISCOUNT_TYPE_CHOICES = [
+        (DISCOUNT_FLAT, "Flat"),
+        (DISCOUNT_PERCENT, "Percent"),
+    ]
+
+    code = models.CharField(max_length=50, unique=True)
+    razorpay_offer_id = models.CharField(max_length=100, unique=True)
+    discount_type = models.CharField(max_length=10, choices=DISCOUNT_TYPE_CHOICES)
+    discount_value = models.DecimalField(max_digits=10, decimal_places=2)
+    max_discount_amount = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    minimum_order_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    max_uses_total = models.PositiveIntegerField(blank=True, null=True)
+    max_uses_per_user = models.PositiveIntegerField(default=1)
+    valid_from = models.DateTimeField(blank=True, null=True)
+    valid_until = models.DateTimeField(blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["code"]
+
+    def __str__(self):
+        return self.code
+
+    def is_available_now(self):
+        now = timezone.now()
+        if not self.is_active:
+            return False, "Promo code is inactive."
+        if self.valid_from and now < self.valid_from:
+            return False, "Promo code is not active yet."
+        if self.valid_until and now > self.valid_until:
+            return False, "Promo code has expired."
+        if self.max_uses_total and self.usages.count() >= self.max_uses_total:
+            return False, "Promo code usage limit is over."
+        return True, ""
+
+
+class PromoCodeUsage(models.Model):
+    promo_code = models.ForeignKey(PromoCode, related_name="usages", on_delete=models.PROTECT)
+    profile = models.ForeignKey(UserProfile, related_name="promo_usages", on_delete=models.CASCADE)
+    razorpay_offer_id = models.CharField(max_length=100)
+    razorpay_order_id = models.CharField(max_length=100)
+    razorpay_payment_id = models.CharField(max_length=100, unique=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    used_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-used_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["promo_code", "profile"],
+                name="unique_promo_code_per_profile",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.profile} - {self.promo_code}"
+```
+
+Also ensure:
+
+```python
+from django.utils import timezone
+```
+
+
+=========================================================
+3. RAZORPAY / URLS
+=========================================================
+
+File: pixyproject/urls.py
+
+```python
+path("create-order/", views.create_order, name="create_order"),
+path("validate-promo/", views.validate_promo_code, name="validate_promo_code"),
+path("verify-payment/", views.verify_payment, name="verify_payment"),
+```
+
+
+=========================================================
+4. RAZORPAY / TEMPLATE HTML
+=========================================================
+
+File: cardapp/templates/nk_appform.html
+
+Add this promo UI inside STEP 3, before the hidden `razorpay_payment_id` input:
+
+```html
+<div class="AEP-OneSection promo-code-row">
+    <span>
+        <input type="text" id="promo_code" name="promo_code" placeholder="Enter promo code">
+    </span>
+    <button type="button" id="applyPromoBtn" class="Common-Btn" onclick="applyPromoCode(this)">Apply</button>
+</div>
+<p id="promoMessage" style="display:none;"></p>
+```
+
+Use this Razorpay JS block. It includes:
+- promo validation
+- create order with promo_code query params
+- UPI-first checkout block
+- robust JSON parsing
+- payment verification
+
+```html
+<script>
+let paymentInProgress = false;
+let rzpInstance = null;
+let promoApplied = false;
+
+function getPromoParams(){
+    return new URLSearchParams({
+        profile_id: document.getElementById("profile_id").value || "",
+        public_username: document.querySelector("[name='public_username']")?.value || "",
+        contct_num: document.querySelector("[name='contct_num']")?.value || "",
+        promo_code: document.getElementById("promo_code").value || ""
+    });
+}
+
+function parseJsonResponse(res){
+    return res.text().then(text => {
+        let data = {};
+
+        try {
+            data = text ? JSON.parse(text) : {};
+        } catch (e) {
+            throw new Error("Server returned an HTML error page. Please restart Django and check the terminal error.");
+        }
+
+        if(!res.ok){
+            throw new Error(data.message || "Request failed.");
+        }
+
+        return data;
+    });
+}
+
+function applyPromoCode(btn){
+    const promoInput = document.getElementById("promo_code");
+
+    if(!promoInput.value.trim()){
+        showPromoMessage("Enter promo code.", false);
+        return;
+    }
+
+    btn.disabled = true;
+    btn.innerText = "Checking...";
+
+    fetch("/validate-promo/?" + getPromoParams().toString())
+    .then(parseJsonResponse)
+    .then(data => {
+        promoApplied = true;
+        if(data.profile_id){
+            document.getElementById("profile_id").value = data.profile_id;
+        }
+        promoInput.value = data.promo_code || promoInput.value;
+        showPromoMessage(data.message || "Promo code applied.", true);
+    })
+    .catch(err => {
+        promoApplied = false;
+        showPromoMessage(err.message || "Invalid promo code.", false);
+    })
+    .finally(() => {
+        btn.disabled = false;
+        btn.innerText = "Apply";
+    });
+}
+
+function startPayment(btn){
+
+    if(paymentInProgress) return;
+
+    paymentInProgress = true;
+    btn.disabled = true;
+    btn.innerText = "Processing...";
+
+    const params = getPromoParams();
+
+    fetch("/create-order/?" + params.toString())
+    .then(parseJsonResponse)
+    .then(data => {
+        showPromoMessage(data.promo_code ? "Promo code applied." : "", true);
+
+        const options = {
+            key: data.key,
+            amount: data.amount,
+            currency: data.currency || "INR",
+            order_id: data.order_id,
+
+            name: "Pixelstat eSolution",
+            description: "1 Year Access",
+            prefill: {
+                name: document.querySelector("[name='name']")?.value || "",
+                email: document.querySelector("[name='email_Id']")?.value || "",
+                contact: document.querySelector("[name='contct_num']")?.value || ""
+            },
+
+            handler: function(response){
+                verifyPayment(response);
+            },
+
+            modal: {
+                ondismiss: function(){
+                    sendPaymentFailed();
+                    resetPaymentButton(btn);
+                    rzpInstance = null;
+                }
+            },
+
+            config: {
+                display: {
+                    blocks: {
+                        upi_preferred: {
+                            name: "Pay via UPI",
+                            instruments: [
+                                {
+                                    method: "upi"
+                                }
+                            ]
+                        }
+                    },
+                    sequence: ["block.upi_preferred", "card", "wallet", "netbanking"],
+                    preferences: {
+                        show_default_blocks: true
+                    }
+                }
+            }
+        };
+
+        rzpInstance = new Razorpay(options);
+        rzpInstance.open();
+
+    })
+    .catch(err=>{
+        console.error(err);
+        showPromoMessage(err.message || "Payment failed to start", false);
+        resetPaymentButton(btn);
+    });
+}
+
+function showPromoMessage(message, isSuccess){
+    const promoMessage = document.getElementById("promoMessage");
+    if(!promoMessage) return;
+
+    if(!message){
+        promoMessage.style.display = "none";
+        promoMessage.innerText = "";
+        return;
+    }
+
+    promoMessage.style.display = "block";
+    promoMessage.innerText = message;
+    promoMessage.style.color = isSuccess ? "green" : "red";
+    promoMessage.style.textAlign = "center";
+    promoMessage.style.fontSize = "24px";
+    promoMessage.style.margin = "12px 0 28px";
+}
+
+function sendPaymentFailed(){
+
+    fetch("/create/", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: new URLSearchParams({
+            step: "3",
+            profile_id: document.getElementById("profile_id").value,
+            payment_failed: "true"
+        })
+    });
+}
+
+function verifyPayment(response){
+
+    fetch("/verify-payment/", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body:
+            "razorpay_payment_id=" + response.razorpay_payment_id +
+            "&razorpay_order_id=" + response.razorpay_order_id +
+            "&razorpay_signature=" + response.razorpay_signature
+    })
+    .then(parseJsonResponse)
+    .then(data => {
+
+        if(data.status === "success"){
+
+            if(rzpInstance) rzpInstance.close();
+
+            let form = document.getElementById("mainForm");
+
+            if(data.profile_id){
+                document.getElementById("profile_id").value = data.profile_id;
+            }
+
+            let input = document.createElement("input");
+            input.type = "hidden";
+            input.name = "razorpay_payment_id";
+            input.value = response.razorpay_payment_id;
+
+            form.appendChild(input);
+
+            document.getElementById("step").value = "3";
+            form.submit();
+
+        } else {
+            alert("Payment verification failed");
+        }
+    });
+}
+
+function resetPaymentButton(btn){
+    paymentInProgress = false;
+    if(btn){
+        btn.disabled = false;
+        btn.innerText = "Pay Now";
+    }
+}
+</script>
+```
+
+Add this CSS for the promo row:
+
+```html
+<style>
+.promo-code-row {
+    align-items: stretch;
+    display: flex;
+    gap: 10px;
+    margin: 18px auto 0;
+    max-width: 900px;
+    width: 100%;
+}
+
+.promo-code-row span {
+    flex: 1;
+}
+
+.promo-code-row input {
+    box-sizing: border-box;
+    height: 44px;
+    width: 100% !important;
+}
+
+.promo-code-row #applyPromoBtn {
+    height: 44px;
+    margin: 0;
+    min-width: 120px;
+}
+
+@media (max-width: 640px) {
+    .promo-code-row {
+        flex-direction: column;
+    }
+
+    .promo-code-row #applyPromoBtn {
+        width: 100%;
+    }
+}
+</style>
+```
+
+Keep Razorpay checkout script:
+
+```html
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+```
+
+Razorpay-side note:
+- In Razorpay Dashboard, create/use an Offer whose "Applicable On" payment method includes UPI.
+- Razorpay Offers cannot be edited after creation. If UPI was not included, create a new Offer ID and update your promo code record.
+
+
+=========================================================
+5. MANAGER PROMO UI NOTE
+=========================================================
+
+File: cardapp/templates/manager/promo_codes.html
+
+Use this Razorpay Offer ID input block:
+
+```html
+<div>
+    <input type="text" name="razorpay_offer_id" value="{{ promo.razorpay_offer_id|default:'' }}" placeholder="Razorpay Offer ID" required>
+    <small style="display:block; margin-top:5px; color:#666;">Create/use an offer whose Applicable On payment method includes UPI. Razorpay offers cannot be edited after creation.</small>
+</div>
+```
+
+
+=========================================================
+6. EDIT CARD OTP PROTECTION BACKEND
+=========================================================
+
+File: cardapp/views.py
+
+Authorization helper:
+
+```python
+def is_profile_edit_authorized(request, profile):
+    if request.user.is_authenticated and request.user.is_staff:
+        return True
+
+    verified_profile_id = clean_int_id(
+        request.session.get("verified_edit_profile_id")
+        or request.session.get("otp_profile_id")
+    )
+
+    return bool(
+        request.session.get("otp_verified")
+        and verified_profile_id
+        and str(profile.id) == str(verified_profile_id)
+    )
+```
+
+In `view_business_card`, add `can_edit_card` to context:
+
+```python
+def view_business_card(request, public_username):
+    profile = get_object_or_404(UserProfile, public_username=public_username)
+
+    services = profile.services.all()
+    socials = profile.social_links.all()
+    branches = profile.branches.all()
+    can_edit_card = is_profile_edit_authorized(request, profile)
+
+    return render(request, "nk_view_businesscard.html", {
+        "profile": profile,
+        "services": services,
+        "socials": socials,
+        "branches": branches,
+        "can_edit_card": can_edit_card,
+    })
+```
+
+At the top of `edit_card`, block users who did not OTP-verify this exact profile.
+Also remove `@csrf_exempt` from `edit_card` if your edit template already has `{% csrf_token %}`.
+
+```python
+def edit_card(request, pk):
+    profile = get_object_or_404(UserProfile, pk=pk)
+    if not is_profile_edit_authorized(request, profile):
+        messages.warning(request, "Please verify OTP before editing your card.")
+        return redirect("index")
+
+    services = Service.objects.filter(profile=profile)
+
+    # Keep your existing edit_card GET/POST logic below this line.
+```
+
+In `verify_otp`, after OTP is successfully validated and cleared, store the verified profile id:
+
+```python
+profile.otp = None
+profile.otp_expiry = None
+profile.save()
+
+request.session['otp_verified'] = True
+request.session['verified_edit_profile_id'] = profile.id
+request.session.set_expiry(1800)
+```
+
+In `save_form` or logout/session cleanup, clear the edit session too:
+
+```python
+request.session.pop('otp_verified', None)
+request.session.pop('otp_profile_id', None)
+request.session.pop('verified_edit_profile_id', None)
+```
+
+
+=========================================================
+7. EDIT CARD OTP PROTECTION TEMPLATE
+=========================================================
+
+File: cardapp/templates/nk_view_businesscard.html
+
+Only show sidebar Edit Card link if OTP verified:
+
+```html
+{% if can_edit_card %}
+<li><a href="{% url 'edit_card' profile.id %}"> <i class="fa fa-angle-right"></i> Edit Card</a></li>
+{% endif %}
+```
+
+Only show bottom Edit Card button if OTP verified:
+
+```html
+{% if can_edit_card %}
+    <button class="Common-Btn" >
+        <span class="HideDview"><i class="fa fa-edit"></i></span>
+        <span class="HideMview"><a href="{% url 'edit_card' profile.id %}" class="btn edit-btn">Edit Card</a></span>
+    </button>
+{% endif %}
+```
+
+
+=========================================================
+8. EDIT CARD OTP PROTECTION URLS
+=========================================================
+
+File: pixyproject/urls.py
+
+These existing routes are required:
+
+```python
+path("card/<str:public_username>/", views.view_business_card, name="view_business_card"),
+path("edit_card/<int:pk>/", views.edit_card, name="edit_card"),
+path('generate-otp/', views.generate_otp, name='generate_otp'),
+path('verify-otp/', views.verify_otp, name='verify_otp'),
+path('save-form/', views.save_form, name='save_form'),
+```
+
+
+=========================================================
+9. SETTINGS NEEDED FOR RAZORPAY
+=========================================================
+
+File: settings.py
+
+Make sure the other project has:
+
+```python
+API_ID = "your_razorpay_key_id"
+API_SECRET = "your_razorpay_key_secret"
+REGISTRATION_FEE = 260
+```
+
+Adjust `REGISTRATION_FEE` to your actual amount.
+
+
+=========================================================
+10. FINAL CHECKLIST AFTER COPYING
+=========================================================
+
+1. Run migrations if you added PromoCode / PromoCodeUsage models:
+   python manage.py makemigrations
+   python manage.py migrate
+
+2. Confirm these URLs work:
+   /validate-promo/
+   /create-order/
+   /verify-payment/
+
+3. In Razorpay Dashboard:
+   - Create a new Offer ID if UPI was not included originally.
+   - Make sure Applicable On includes UPI.
+   - Copy that Offer ID into your promo code admin.
+
+4. Test edit-card security:
+   - Open /edit_card/<id>/ directly without OTP: should redirect/block.
+   - Verify OTP from My Card flow: should show Edit Card for that profile only.
+   - Try another profile id after OTP: should redirect/block.
+
