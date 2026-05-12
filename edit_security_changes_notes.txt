@@ -1,0 +1,360 @@
+EDIT SECURITY AND NEW RECORD FIX NOTES
+======================================
+
+Purpose
+-------
+Edit card should not be visible or accessible directly by URL unless the visitor has the correct session after new card creation/payment or OTP login.
+
+This fix works for:
+1. New records: session key latest_profile_id is set after payment success.
+2. Old records: session key otp_profile_id is set after OTP login.
+
+
+FILES WHERE CHANGES ARE NEEDED
+==============================
+
+1. pixyproject/settings.py
+--------------------------
+Reason:
+Sensitive values were removed from settings.py for security. The app was crashing because cardapp/views.py still expected settings.API_ID and settings.API_SECRET at import time.
+
+Change location:
+Near the SECRET_KEY section.
+
+Code to add:
+
+SECRET_KEY = os.environ.get(
+    "DJANGO_SECRET_KEY",
+    "django-insecure-local-development-key-change-in-production",
+)
+
+Change location:
+Near Razorpay credentials / REGISTRATION_FEE.
+
+Code to add:
+
+REGISTRATION_FEE = 260
+API_ID = os.environ.get("RAZORPAY_API_ID", "")
+API_SECRET = os.environ.get("RAZORPAY_API_SECRET", "")
+
+Production server environment variables required:
+DJANGO_SECRET_KEY
+RAZORPAY_API_ID
+RAZORPAY_API_SECRET
+
+
+2. cardapp/views.py
+-------------------
+Reason:
+The edit page was accessible using edit_card/<id>/ directly. Also, when Razorpay keys were removed, Django crashed during startup.
+
+Required import:
+HttpResponseForbidden must be imported.
+
+Current import already has:
+from django.http import HttpResponseForbidden
+
+
+FULL UPDATED view_business_card FUNCTION
+----------------------------------------
+
+def view_business_card(request, public_username):
+    profile = get_object_or_404(UserProfile, public_username=public_username)
+
+    services = profile.services.all()
+    socials = profile.social_links.all()
+    branches = profile.branches.all()
+    can_edit = request.session.get("latest_profile_id") == profile.id or request.session.get("otp_profile_id") == profile.id
+
+    return render(request, "nk_view_businesscard.html", {
+        "profile": profile,
+        "services": services,
+        "socials": socials,
+        "branches": branches,
+        "can_edit": can_edit,
+    })
+
+
+What changed in view_business_card:
+1. Added can_edit session check.
+2. Passed can_edit to nk_view_businesscard.html.
+
+
+FULL UPDATED edit_card FUNCTION
+-------------------------------
+
+@csrf_exempt
+def edit_card(request, pk):
+    profile = get_object_or_404(UserProfile, pk=pk)
+    can_edit = request.session.get("latest_profile_id") == profile.id or request.session.get("otp_profile_id") == profile.id
+    if not can_edit:
+        return HttpResponseForbidden("You are not allowed to edit this card.")
+
+    services = Service.objects.filter(profile=profile)
+    # links = SocialLink.objects.filter(profile=profile)
+    if request.method == "POST":
+        youtube=request.POST.get('youtube')
+        pinterest=request.POST.get('pinterest')
+        company_logo=request.FILES.get('company_logo')
+
+        # ================================
+        # UPDATE PROFILE
+        # ================================
+        profile.public_username = request.POST.get("public_username") or profile.public_username
+
+        profile.full_name = request.POST.get("fname")
+        profile.title = request.POST.get("designation")
+        profile.email = request.POST.get("email_Id")
+        profile.phone = request.POST.get("contact_number")
+        profile.phone2 = request.POST.get("contact_number2")
+
+        profile.website = request.POST.get("websiteurl")
+
+        profile.address = request.POST.get("perm_address")
+
+        profile.company = request.POST.get("companyname")
+        profile.company_email = request.POST.get("companyemail")
+        profile.company_phone1 = request.POST.get("companycontactno")
+        profile.company_phone2 = request.POST.get("companycontactno2")
+        profile.intro = request.POST.get("introtext")
+        profile.company_tagline1 = request.POST.get("companytagline1")
+        profile.company_tagline2 = request.POST.get("companytagline2")
+        print("TAGLINE 1:", request.POST.get("companytagline1"))
+        print("TAGLINE 2:", request.POST.get("companytagline2"))
+        profile.personal_insta_url=request.POST.get('instagramurl')
+        profile.personal_facebook_url=request.POST.get('facebookurl')
+        profile.personal_linked_url=request.POST.get('linkdinurl')
+        profile.personal_twitter_url=request.POST.get('twitterurl')
+
+        profile.social_insta_url=request.POST.get('s_instagramurl')
+        profile.social_facebook_url=request.POST.get('s_facebookurl')
+        profile.social_linked_url=request.POST.get('s_linkdinurl')
+        profile.social_twitter_url=request.POST.get('s_twitterurl')
+        profile.social_pinterest_url=pinterest
+        profile.social_youtube_url=youtube
+        if company_logo:
+            profile.company_logo=company_logo
+
+        if request.FILES.get("banner_img"):
+            profile.banner = request.FILES.get("banner_img")
+
+        if request.FILES.get("photo"):
+            profile.avatar = request.FILES.get("photo")
+
+        profile.save()
+
+        # ================= EDIT SERVICES (UPDATE + CREATE) =================
+
+        titles = request.POST.getlist("servicetitle[]")
+        taglines = request.POST.getlist("servicetagline[]")
+        images = request.FILES.getlist("serviceimg[]")
+
+        existing_services = list(Service.objects.filter(profile=profile))
+
+        image_index = 0  # for uploaded images only
+
+        for i in range(len(titles)):
+            title = titles[i].strip()
+            tagline = taglines[i].strip() if i < len(taglines) else ""
+
+            if not title:
+                continue
+
+            # UPDATE EXISTING SERVICE
+            if i < len(existing_services):
+                service = existing_services[i]
+                service.title = title
+                service.description = tagline
+
+                if image_index < len(images):
+                    service.image = images[image_index]
+                    image_index += 1
+
+                service.save()
+
+            # CREATE NEW SERVICE (from + button)
+            else:
+                image = None
+                if image_index < len(images):
+                    image = images[image_index]
+                    image_index += 1
+
+                Service.objects.create(
+                    profile=profile,
+                    title=title,
+                    description=tagline,
+                    image=image
+                )
+
+        # ================================
+        # UPDATE BRANCHES
+        # ================================
+
+        Branch.objects.filter(profile=profile).delete()
+        branch_names = request.POST.getlist("branch_name[]")
+        for name in branch_names:
+            if name.strip():
+                Branch.objects.create(profile=profile, name=name)
+
+        return redirect(f'/card/{profile.public_username}/')
+
+    # ================================
+    # GET REQUEST (LOAD EDIT PAGE)
+    # ================================
+    services = profile.services.all()
+    branches = profile.branches.all()
+
+    return render(request, "nk_editcard.html", {
+        "card": profile,
+        "profile": profile,
+        "services": services,
+        "branches": branches,
+    })
+
+
+What changed in edit_card:
+1. Added can_edit session check at the top.
+2. Blocks direct URL access with 403 if session does not belong to that profile.
+3. Fixed wrong field names:
+   - personal_fac_url changed to personal_facebook_url
+   - company_insta_url changed to social_insta_url
+   - company_twitter_url changed to social_twitter_url
+
+
+FULL UPDATED RAZORPAY FUNCTIONS
+-------------------------------
+
+def get_razorpay_client():
+    if not settings.API_ID or not settings.API_SECRET:
+        return None
+    return razorpay.Client(auth=(settings.API_ID, settings.API_SECRET))
+
+
+def create_order(request):
+    razorpay_client = get_razorpay_client()
+    if razorpay_client is None:
+        return JsonResponse(
+            {"status": "failed", "message": "Payment gateway is not configured."},
+            status=503,
+        )
+
+    amount = settings.REGISTRATION_FEE * 100
+    order = razorpay_client.order.create({
+        "amount": amount,
+        "currency": "INR",
+        "payment_capture": 1
+    })
+    print('amount',amount)
+    print('order',order)
+    return JsonResponse({
+        "order_id": order["id"],
+        "amount": amount,
+        "key": settings.API_ID
+    })
+
+
+@csrf_exempt
+def verify_payment(request):
+    if request.method != "POST":
+        return JsonResponse({"status": "invalid"})
+
+    razorpay_client = get_razorpay_client()
+    if razorpay_client is None:
+        return JsonResponse(
+            {"status": "failed", "message": "Payment gateway is not configured."},
+            status=503,
+        )
+
+    try:
+        razorpay_client.utility.verify_payment_signature({
+            "razorpay_order_id": request.POST.get("razorpay_order_id"),
+            "razorpay_payment_id": request.POST.get("razorpay_payment_id"),
+            "razorpay_signature": request.POST.get("razorpay_signature"),
+        })
+
+        return JsonResponse({"status": "success"})
+
+    except SignatureVerificationError:
+        return JsonResponse({"status": "failed"})
+
+
+What changed in Razorpay:
+1. Removed direct razorpay.Client creation at module load.
+2. Added get_razorpay_client().
+3. If API keys are missing, create_order and verify_payment return a proper 503 JSON response instead of crashing the whole project.
+
+
+3. cardapp/templates/nk_view_businesscard.html
+----------------------------------------------
+Reason:
+Edit button/link should not be visible for public users who open the card URL directly.
+
+Change location 1:
+Sidebar Edit Card link.
+
+Use:
+
+{% if can_edit %}
+<li><a href="{% url 'edit_card' profile.id %}"> <i class="fa fa-angle-right"></i> Edit Card</a></li>
+{% endif %}
+
+Change location 2:
+Bottom Edit Card button.
+
+Use:
+
+{% if can_edit %}
+<button class="Common-Btn" >
+    <span class="HideDview"><i class="fa fa-edit"></i></span>
+    <span class="HideMview"><a href="{% url 'edit_card' profile.id %}" class="btn edit-btn">
+        Edit Card
+    </a></span>
+</button>
+{% endif %}
+
+
+HOW SESSION ACCESS WORKS
+========================
+
+New record:
+After successful payment, create_card saves:
+
+request.session["latest_profile_id"] = profile.id
+
+Then edit_card allows edit only when:
+
+request.session.get("latest_profile_id") == profile.id
+
+Old record through OTP:
+generate_otp saves:
+
+request.session["otp_profile_id"] = profile.id
+
+Then edit_card allows edit only when:
+
+request.session.get("otp_profile_id") == profile.id
+
+
+VERIFICATION DONE
+=================
+
+1. python manage.py check
+Result:
+System check identified no issues (0 silenced).
+
+2. Direct edit URL without session:
+/edit_card/<id>/
+Result:
+403 forbidden.
+
+3. Edit URL with matching session:
+/edit_card/<id>/
+Result:
+200 page loads.
+
+4. Missing Razorpay API keys:
+/create-order/
+Result:
+503 JSON response:
+{"status": "failed", "message": "Payment gateway is not configured."}
+

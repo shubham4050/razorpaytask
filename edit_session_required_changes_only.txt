@@ -1,0 +1,295 @@
+EDIT SESSION REQUIRED CHANGES ONLY
+==================================
+
+This file contains only the required changes for edit functionality security.
+Razorpay changes are not included because Razorpay credentials are already available on the server.
+
+
+GOAL
+====
+
+1. Public users should not see the Edit Card button/link.
+2. Direct URL access like /edit_card/<id>/ should not open the edit page unless the visitor has the correct session.
+3. Newly created cards should be editable after payment because create_card already saves latest_profile_id in session.
+4. Old cards should be editable after OTP login because generate_otp already saves otp_profile_id in session.
+
+
+FILES TO CHANGE
+===============
+
+1. cardapp/views.py
+2. cardapp/templates/nk_view_businesscard.html
+
+
+CHANGE 1: cardapp/views.py
+==========================
+
+Make sure this import exists near the top:
+
+from django.http import HttpResponseForbidden
+
+
+FULL UPDATED view_business_card FUNCTION
+----------------------------------------
+
+Replace the existing view_business_card function with this:
+
+def view_business_card(request, public_username):
+    profile = get_object_or_404(UserProfile, public_username=public_username)
+
+    services = profile.services.all()
+    socials = profile.social_links.all()
+    branches = profile.branches.all()
+    can_edit = request.session.get("latest_profile_id") == profile.id or request.session.get("otp_profile_id") == profile.id
+
+    return render(request, "nk_view_businesscard.html", {
+        "profile": profile,
+        "services": services,
+        "socials": socials,
+        "branches": branches,
+        "can_edit": can_edit,
+    })
+
+
+What changed:
+-------------
+Added this line:
+
+can_edit = request.session.get("latest_profile_id") == profile.id or request.session.get("otp_profile_id") == profile.id
+
+And passed it to the template:
+
+"can_edit": can_edit,
+
+
+FULL UPDATED edit_card FUNCTION
+-------------------------------
+
+Replace the existing edit_card function with this:
+
+@csrf_exempt
+def edit_card(request, pk):
+    profile = get_object_or_404(UserProfile, pk=pk)
+    can_edit = request.session.get("latest_profile_id") == profile.id or request.session.get("otp_profile_id") == profile.id
+    if not can_edit:
+        return HttpResponseForbidden("You are not allowed to edit this card.")
+
+    services = Service.objects.filter(profile=profile)
+    # links = SocialLink.objects.filter(profile=profile)
+    if request.method == "POST":
+        youtube=request.POST.get('youtube')
+        pinterest=request.POST.get('pinterest')
+        company_logo=request.FILES.get('company_logo')
+
+        # ================================
+        # UPDATE PROFILE
+        # ================================
+        profile.public_username = request.POST.get("public_username") or profile.public_username
+
+        profile.full_name = request.POST.get("fname")
+        profile.title = request.POST.get("designation")
+        profile.email = request.POST.get("email_Id")
+        profile.phone = request.POST.get("contact_number")
+        profile.phone2 = request.POST.get("contact_number2")
+
+        profile.website = request.POST.get("websiteurl")
+
+        profile.address = request.POST.get("perm_address")
+
+        profile.company = request.POST.get("companyname")
+        profile.company_email = request.POST.get("companyemail")
+        profile.company_phone1 = request.POST.get("companycontactno")
+        profile.company_phone2 = request.POST.get("companycontactno2")
+        profile.intro = request.POST.get("introtext")
+        profile.company_tagline1 = request.POST.get("companytagline1")
+        profile.company_tagline2 = request.POST.get("companytagline2")
+        print("TAGLINE 1:", request.POST.get("companytagline1"))
+        print("TAGLINE 2:", request.POST.get("companytagline2"))
+        profile.personal_insta_url=request.POST.get('instagramurl')
+        profile.personal_facebook_url=request.POST.get('facebookurl')
+        profile.personal_linked_url=request.POST.get('linkdinurl')
+        profile.personal_twitter_url=request.POST.get('twitterurl')
+
+        profile.social_insta_url=request.POST.get('s_instagramurl')
+        profile.social_facebook_url=request.POST.get('s_facebookurl')
+        profile.social_linked_url=request.POST.get('s_linkdinurl')
+        profile.social_twitter_url=request.POST.get('s_twitterurl')
+        profile.social_pinterest_url=pinterest
+        profile.social_youtube_url=youtube
+        if company_logo:
+            profile.company_logo=company_logo
+
+        if request.FILES.get("banner_img"):
+            profile.banner = request.FILES.get("banner_img")
+
+        if request.FILES.get("photo"):
+            profile.avatar = request.FILES.get("photo")
+
+        profile.save()
+
+        # ================= EDIT SERVICES (UPDATE + CREATE) =================
+
+        titles = request.POST.getlist("servicetitle[]")
+        taglines = request.POST.getlist("servicetagline[]")
+        images = request.FILES.getlist("serviceimg[]")
+
+        existing_services = list(Service.objects.filter(profile=profile))
+
+        image_index = 0  # for uploaded images only
+
+        for i in range(len(titles)):
+            title = titles[i].strip()
+            tagline = taglines[i].strip() if i < len(taglines) else ""
+
+            if not title:
+                continue
+
+            # UPDATE EXISTING SERVICE
+            if i < len(existing_services):
+                service = existing_services[i]
+                service.title = title
+                service.description = tagline
+
+                if image_index < len(images):
+                    service.image = images[image_index]
+                    image_index += 1
+
+                service.save()
+
+            # CREATE NEW SERVICE (from + button)
+            else:
+                image = None
+                if image_index < len(images):
+                    image = images[image_index]
+                    image_index += 1
+
+                Service.objects.create(
+                    profile=profile,
+                    title=title,
+                    description=tagline,
+                    image=image
+                )
+
+        # ================================
+        # UPDATE BRANCHES
+        # ================================
+
+        Branch.objects.filter(profile=profile).delete()
+        branch_names = request.POST.getlist("branch_name[]")
+        for name in branch_names:
+            if name.strip():
+                Branch.objects.create(profile=profile, name=name)
+
+        return redirect(f'/card/{profile.public_username}/')
+
+    # ================================
+    # GET REQUEST (LOAD EDIT PAGE)
+    # ================================
+    services = profile.services.all()
+    branches = profile.branches.all()
+
+    return render(request, "nk_editcard.html", {
+        "card": profile,
+        "profile": profile,
+        "services": services,
+        "branches": branches,
+    })
+
+
+What changed:
+-------------
+Added this security check at the top:
+
+can_edit = request.session.get("latest_profile_id") == profile.id or request.session.get("otp_profile_id") == profile.id
+if not can_edit:
+    return HttpResponseForbidden("You are not allowed to edit this card.")
+
+Also fixed these field names so edit saves correctly:
+
+Wrong:
+profile.personal_fac_url
+profile.company_insta_url
+profile.company_twitter_url
+
+Correct:
+profile.personal_facebook_url
+profile.social_insta_url
+profile.social_twitter_url
+
+
+CHANGE 2: cardapp/templates/nk_view_businesscard.html
+=====================================================
+
+Sidebar Edit Card link:
+-----------------------
+
+Replace this:
+
+<li><a href="{% url 'edit_card' profile.id %}"> <i class="fa fa-angle-right"></i> Edit Card</a></li>
+
+With this:
+
+{% if can_edit %}
+<li><a href="{% url 'edit_card' profile.id %}"> <i class="fa fa-angle-right"></i> Edit Card</a></li>
+{% endif %}
+
+
+Bottom Edit Card button:
+------------------------
+
+Wrap the Edit Card button with:
+
+{% if can_edit %}
+    existing edit button code here
+{% endif %}
+
+Full code:
+
+{% if can_edit %}
+<button class="Common-Btn" >
+    <span class="HideDview"><i class="fa fa-edit"></i></span>
+    <span class="HideMview"><a href="{% url 'edit_card' profile.id %}" class="btn edit-btn">
+        Edit Card
+    </a></span>
+</button>
+{% endif %}
+
+
+SESSION LOGIC
+=============
+
+For new records:
+----------------
+After payment success, create_card already stores:
+
+request.session["latest_profile_id"] = profile.id
+
+So the same browser/session can edit that new card.
+
+
+For old records:
+----------------
+After OTP generation/login, generate_otp already stores:
+
+request.session["otp_profile_id"] = profile.id
+
+So the OTP-verified browser/session can edit that old card.
+
+
+EXPECTED OUTPUT
+===============
+
+1. Open public card URL without login/session:
+   - Edit Card link is hidden.
+   - Direct /edit_card/<id>/ URL returns 403.
+
+2. Create a new card and complete payment:
+   - Session has latest_profile_id.
+   - Edit Card link is visible.
+   - Edit page opens correctly.
+
+3. Login using OTP for an existing/old card:
+   - Session has otp_profile_id.
+   - Edit Card link is visible.
+   - Edit page opens correctly.
+
