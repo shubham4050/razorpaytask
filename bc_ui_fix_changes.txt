@@ -1,0 +1,250 @@
+BC LINK UI FIX CHANGES
+======================
+
+Issue
+-----
+After creating a new card, the thank-you page gives a /bc/<public_username>/ link.
+The link was opening, but the UI could break sometimes depending on optional data.
+
+Main reason:
+Some HTML in the /bc/ template was fragile when optional fields were missing, like email or services.
+
+
+FILES CHANGED
+=============
+
+1. cardapp/templates/nk_businesscard.html
+2. cardapp/templates/nk_view_businesscard.html
+
+
+CHANGE 1
+========
+
+File:
+cardapp/templates/nk_businesscard.html
+
+Problem:
+Twitter URL had a typo.
+
+Old code:
+
+{% if profile.personal_twitter_url %}
+<a href="{{ profile.personal_twitter_ur }}" target="_blank"><i class="fa fa-twitter"></i></a>
+{% endif %}
+
+New code:
+
+{% if profile.personal_twitter_url %}
+<a href="{{ profile.personal_twitter_url }}" target="_blank"><i class="fa fa-twitter"></i></a>
+{% endif %}
+
+Reason:
+The old variable profile.personal_twitter_ur was wrong.
+Correct field is profile.personal_twitter_url.
+
+
+CHANGE 2
+========
+
+File:
+cardapp/templates/nk_businesscard.html
+
+Problem:
+Contact section opened only inside this condition:
+
+{% if profile.email %}
+<div class="infos">
+
+But phone, phone2, and website were outside/after this condition.
+If email was missing, the HTML structure could become unstable and affect the UI.
+
+New structure:
+
+<div class="infos">
+    <h2>Contact Me</h2>
+    {% if profile.email %}
+    <div class="Cont_details">
+        <i class="fa fa-envelope"></i>
+        <a href="mailto:{{ profile.email }}">{{ profile.email }}</a>
+    </div>
+    {% endif %}
+
+    {% if profile.phone %}
+    <div class="Cont_details">
+        <i class="fa fa-phone"></i>
+        <a href="tel:{{ profile.phone }}">{{ profile.phone }}</a>
+    </div>
+    {% endif %}
+
+    {% if profile.phone2 %}
+    <div class="Cont_details">
+        <i class="fa fa-phone"></i>
+        <a href="tel:{{ profile.phone2 }}">{{ profile.phone2 }}</a>
+    </div>
+    {% endif %}
+
+    {% if profile.website %}
+    <div class="Cont_details">
+        <i class="fa fa-globe"></i>
+        <a href="{{ profile.website }}" target="_blank">{{ profile.website|default:''|slice:50 }}</a>
+    </div>
+    {% endif %}
+</div>
+
+Reason:
+Now the Contact Me container always opens/closes properly.
+Only individual contact rows are conditional.
+
+
+CHANGE 3
+========
+
+File:
+cardapp/templates/nk_businesscard.html
+
+Problem:
+The slideshow condition was:
+
+{% if profile.services %}
+
+This checks the related manager object, not the actual service list.
+It can behave incorrectly for cards with no services.
+
+Old code:
+
+{% if profile.services %}
+<div class="slideshow-container">
+    {% if services %}
+        ...
+    {% endif %}
+</div>
+{% endif %}
+
+New code:
+
+{% if services %}
+<div class="slideshow-container">
+    ...
+</div>
+{% endif %}
+
+Reason:
+The view already sends services = profile.services.all().
+The template should check services directly.
+
+
+CHANGE 4
+========
+
+File:
+cardapp/templates/nk_businesscard.html
+
+Problem:
+The modal close button had broken HTML.
+
+Old code:
+
+<span onclick="closeModal()" class="modal-close-btn"">x</span>
+
+New code:
+
+<span onclick="closeModal()" class="modal-close-btn">x</span>
+
+Reason:
+Extra quote could break HTML parsing and affect modal/UI behavior.
+
+
+CHANGE 5
+========
+
+File:
+cardapp/templates/nk_businesscard.html
+
+Problem:
+Save/contact button used only phone2.
+For new cards phone2 may be empty.
+
+Old code:
+
+<a href="tel:{{ profile.phone2 }}"><i class="fa fa-user-plus"></i></a>
+
+New code:
+
+<a href="tel:{% if profile.phone2 %}{{ profile.phone2 }}{% else %}{{ profile.phone }}{% endif %}"><i class="fa fa-user-plus"></i></a>
+
+Reason:
+If phone2 is missing, it falls back to main phone.
+
+
+CHANGE 6
+========
+
+File:
+cardapp/templates/nk_view_businesscard.html
+
+Problem:
+Same contact-section issue existed in the /card/ template.
+
+Change made:
+Moved <div class="infos"> outside the email condition and kept only email row conditional.
+
+Reason:
+This keeps /card/<public_username>/ stable also.
+
+
+CHANGE 7
+========
+
+File:
+cardapp/templates/nk_view_businesscard.html
+
+Problem:
+Same slideshow condition issue existed in the /card/ template.
+
+Old condition:
+
+{% if profile.services %}
+
+New condition:
+
+{% if services %}
+
+Reason:
+The template should check actual service queryset/list.
+
+
+VERIFICATION DONE
+=================
+
+Command:
+python manage.py check
+
+Result:
+System check identified no issues (0 silenced).
+
+
+Local route check:
+All local profiles with public_username were tested for:
+
+/bc/<public_username>/
+/card/<public_username>/
+
+Result:
+All returned 200 OK.
+
+Newest card tested:
+
+/bc/anaghapage/  -> 200 OK
+/card/anaghapage/ -> 200 OK
+
+
+EXPECTED OUTPUT
+===============
+
+After these changes:
+
+1. Thank-you page /bc/ link opens normally.
+2. UI remains stable even if email, phone2, services, or optional social fields are missing.
+3. Twitter personal link uses the correct saved field.
+4. Share modal close button HTML is valid.
+
