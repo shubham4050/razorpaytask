@@ -1,0 +1,1267 @@
+RAZORPAY COUPON / PROMO CODE INTEGRATION - COPY PASTE FILEWISE CODE
+====================================================================
+
+Use this file for integrating the coupon-code functionality into the old build.
+
+Old build checked:
+D:\ABCD\Workflow ppt.zip
+
+Current working build:
+D:\ABCD\Workflow ppt
+
+Scope:
+Only Razorpay coupon / promo-code related code is included here.
+Do not copy unrelated edit-card, OTP, query, or other feature changes from this file.
+
+Important final behavior:
+1. Customer enters coupon code in Step 3.
+2. Django validates coupon.
+3. Django creates Razorpay order with original REGISTRATION_FEE amount.
+4. Django passes Razorpay offer ID using:
+   offers = [promo.razorpay_offer_id]
+   force_offer = True
+5. Razorpay applies the discount once and tracks Offer Usage.
+6. If no coupon is entered, no offer is sent.
+7. Old coupon session is cleared when payment starts without a coupon.
+
+Important Razorpay Dashboard rule:
+For coupon-only behavior, do NOT enable the offer as a default/show-on-checkout offer.
+If enabled, Razorpay can show discount even without entering coupon in our app.
+
+
+====================================================================
+STEP 1 - cardapp/models.py
+====================================================================
+
+Add this import near the top if missing:
+
+from django.utils import timezone
+
+
+Add these models at the bottom of cardapp/models.py:
+
+class PromoCode(models.Model):
+    DISCOUNT_FLAT = "flat"
+    DISCOUNT_PERCENT = "percent"
+    DISCOUNT_TYPE_CHOICES = [
+        (DISCOUNT_FLAT, "Flat"),
+        (DISCOUNT_PERCENT, "Percent"),
+    ]
+
+    code = models.CharField(max_length=50, unique=True)
+    razorpay_offer_id = models.CharField(max_length=100, unique=True)
+    discount_type = models.CharField(max_length=10, choices=DISCOUNT_TYPE_CHOICES)
+    discount_value = models.DecimalField(max_digits=10, decimal_places=2)
+    max_discount_amount = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    minimum_order_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    max_uses_total = models.PositiveIntegerField(blank=True, null=True)
+    max_uses_per_user = models.PositiveIntegerField(default=1)
+    valid_from = models.DateTimeField(blank=True, null=True)
+    valid_until = models.DateTimeField(blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["code"]
+
+    def __str__(self):
+        return self.code
+
+    def is_available_now(self):
+        now = timezone.now()
+        if not self.is_active:
+            return False, "Promo code is inactive."
+        if self.valid_from and now < self.valid_from:
+            return False, "Promo code is not active yet."
+        if self.valid_until and now > self.valid_until:
+            return False, "Promo code has expired."
+        if self.max_uses_total and self.usages.count() >= self.max_uses_total:
+            return False, "Promo code usage limit is over."
+        return True, ""
+
+
+class PromoCodeUsage(models.Model):
+    promo_code = models.ForeignKey(PromoCode, related_name="usages", on_delete=models.PROTECT)
+    profile = models.ForeignKey(UserProfile, related_name="promo_usages", on_delete=models.CASCADE)
+    razorpay_offer_id = models.CharField(max_length=100)
+    razorpay_order_id = models.CharField(max_length=100)
+    razorpay_payment_id = models.CharField(max_length=100, unique=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    used_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-used_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["promo_code", "profile"],
+                name="unique_promo_code_per_profile",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.profile} - {self.promo_code}"
+
+
+After adding models, run:
+
+python manage.py makemigrations
+python manage.py migrate
+
+
+====================================================================
+STEP 2 - cardapp/admin.py
+====================================================================
+
+If your admin.py already has:
+from .models import *
+
+Then add this code below existing admin registrations:
+
+@admin.register(PromoCode)
+class PromoCodeAdmin(admin.ModelAdmin):
+    list_display = (
+        "code",
+        "razorpay_offer_id",
+        "discount_type",
+        "discount_value",
+        "max_uses_per_user",
+        "is_active",
+    )
+    search_fields = ("code", "razorpay_offer_id")
+    list_filter = ("discount_type", "is_active")
+
+
+@admin.register(PromoCodeUsage)
+class PromoCodeUsageAdmin(admin.ModelAdmin):
+    list_display = (
+        "promo_code",
+        "profile",
+        "razorpay_offer_id",
+        "razorpay_order_id",
+        "razorpay_payment_id",
+        "used_at",
+    )
+    search_fields = (
+        "promo_code__code",
+        "profile__full_name",
+        "razorpay_offer_id",
+        "razorpay_order_id",
+        "razorpay_payment_id",
+    )
+    list_filter = ("promo_code", "used_at")
+    readonly_fields = ("used_at",)
+
+
+====================================================================
+STEP 3 - pixyproject/urls.py
+====================================================================
+
+Make sure these routes exist in urlpatterns.
+Add missing lines only.
+
+path("create-order/", views.create_order, name="create_order"),
+path("validate-promo/", views.validate_promo_code, name="validate_promo_code"),
+path("verify-payment/", views.verify_payment, name="verify_payment"),
+
+path("manager/promo-codes/", views.manager_promo_codes, name="manager_promo_codes"),
+path("manager/promo-codes/<int:promo_id>/edit/", views.manager_promo_codes, name="manager_promo_code_edit"),
+path("manager/promo-usage/", views.manager_promo_usage, name="manager_promo_usage"),
+
+
+====================================================================
+STEP 4 - cardapp/views.py IMPORTS
+====================================================================
+
+At the top of views.py, make sure these imports exist.
+If Decimal is already imported, replace it with Decimal, ROUND_HALF_UP.
+
+from decimal import Decimal, ROUND_HALF_UP
+from django.conf import settings
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.db.models import Sum
+from django.core.paginator import Paginator
+from django.contrib.auth.decorators import user_passes_test
+from django.contrib.auth import authenticate, login, logout
+from django.utils import timezone
+from django.utils.dateparse import parse_date, parse_datetime
+
+
+Razorpay import/client block.
+If your old build already has Razorpay client code, merge carefully and keep only one razorpay_client:
+
+try:
+    import razorpay
+    from razorpay.errors import SignatureVerificationError
+except ImportError:
+    razorpay = None
+
+    class SignatureVerificationError(Exception):
+        pass
+
+
+razorpay_client = None
+if razorpay:
+    razorpay_client = razorpay.Client(
+        auth=(settings.API_ID, settings.API_SECRET)
+    )
+
+
+====================================================================
+STEP 5 - cardapp/views.py HELPER FUNCTIONS
+====================================================================
+
+Add these helper functions before create_order().
+If clean_int_id() and get_active_profile() already exist, do not duplicate them.
+
+def clean_int_id(value):
+    value = str(value or "").strip()
+    return value if value.isdigit() else None
+
+
+def get_active_profile(request):
+    profile_id = clean_int_id(
+        request.GET.get("profile_id")
+        or request.POST.get("profile_id")
+        or request.session.get("current_profile_id")
+    )
+
+    if not profile_id:
+        return None
+
+    return UserProfile.objects.filter(id=profile_id).first()
+
+
+def validate_promo_for_profile(code, profile, amount):
+    if not code:
+        return None, ""
+
+    normalized_code = code.strip().upper()
+    promo = PromoCode.objects.filter(code__iexact=normalized_code).first()
+
+    if not promo:
+        return None, "Invalid promo code."
+
+    is_available, message = promo.is_available_now()
+    if not is_available:
+        return None, message
+
+    if Decimal(amount) < promo.minimum_order_amount:
+        return None, f"Minimum order amount for this promo is Rs {promo.minimum_order_amount}."
+
+    used_count = PromoCodeUsage.objects.filter(
+        promo_code=promo,
+        profile=profile,
+    ).count()
+    if used_count >= promo.max_uses_per_user:
+        return None, "You have already used this promo code."
+
+    return promo, ""
+
+
+def calculate_promo_amounts(promo, amount_rupees):
+    amount_rupees = Decimal(str(amount_rupees)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    if not promo:
+        return Decimal("0.00"), amount_rupees
+
+    if promo.discount_type == PromoCode.DISCOUNT_PERCENT:
+        discount = (amount_rupees * promo.discount_value / Decimal("100"))
+        if promo.max_discount_amount:
+            discount = min(discount, promo.max_discount_amount)
+    else:
+        discount = promo.discount_value
+
+    discount = min(discount, amount_rupees).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    payable_amount = (amount_rupees - discount).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return discount, payable_amount
+
+
+====================================================================
+STEP 6 - cardapp/views.py CREATE ORDER
+====================================================================
+
+Replace old create_order() with this final version.
+This version supports:
+- no coupon = full amount and no offer
+- coupon = original order amount + Razorpay offer ID + force_offer
+- prevents old session coupon from applying without code
+- prevents double discount
+
+def create_order(request):
+    if not razorpay_client:
+        return JsonResponse({"status": "failed", "message": "Razorpay package is not installed."}, status=500)
+
+    amount_rupees = Decimal(str(settings.REGISTRATION_FEE))
+    discount_rupees = Decimal("0.00")
+    payable_rupees = amount_rupees
+    amount = int(payable_rupees * 100)
+    promo_code = (request.GET.get("promo_code") or request.POST.get("promo_code") or "").strip()
+    profile = get_active_profile(request)
+
+    if not profile or profile.payment_status:
+        request.session.pop("current_profile_id", None)
+        request.session.pop("applied_promo_code", None)
+        return JsonResponse({"status": "failed", "message": "Complete Step 1 first."}, status=400)
+
+    profile_id = str(profile.id)
+
+    order_payload = {
+        "amount": amount,
+        "currency": "INR",
+        "payment_capture": 1,
+        "receipt": f"nexokard-{profile.id}",
+        "notes": {
+            "profile_id": str(profile.id),
+            "promo_code": promo_code or "",
+        },
+    }
+
+    promo = None
+    if promo_code:
+        promo, promo_error = validate_promo_for_profile(promo_code, profile, amount_rupees)
+        if promo_error:
+            return JsonResponse({"status": "failed", "message": promo_error}, status=400)
+
+        discount_rupees, payable_rupees = calculate_promo_amounts(promo, amount_rupees)
+        if payable_rupees <= Decimal("0.00"):
+            return JsonResponse({
+                "status": "failed",
+                "message": "Promo code cannot reduce this payment to zero. Please contact support.",
+            }, status=400)
+
+        amount = int(amount_rupees * 100)
+        order_payload["amount"] = amount
+        order_payload["offers"] = [promo.razorpay_offer_id]
+        order_payload["force_offer"] = True
+        order_payload["notes"].update({
+            "original_amount": str(amount_rupees),
+            "discount_amount": str(discount_rupees),
+            "payable_amount": str(payable_rupees),
+            "razorpay_offer_id": promo.razorpay_offer_id,
+        })
+    else:
+        request.session.pop("applied_promo_code", None)
+
+    try:
+        order = razorpay_client.order.create(order_payload)
+    except Exception as e:
+        print("Razorpay order create error:", e)
+        return JsonResponse({
+            "status": "failed",
+            "message": "Unable to create Razorpay order. Please check internet/Razorpay credentials and try again.",
+        }, status=502)
+
+    request.session[f"order_profile_{order['id']}"] = profile.id
+    request.session["current_profile_id"] = profile.id
+
+    if promo and profile_id:
+        request.session[f"promo_order_{order['id']}"] = {
+            "promo_id": promo.id,
+            "profile_id": int(profile_id),
+            "amount": str(payable_rupees),
+            "original_amount": str(amount_rupees),
+            "discount_amount": str(discount_rupees),
+        }
+
+    response = {
+        "order_id": order["id"],
+        "amount": amount,
+        "original_amount": str(amount_rupees),
+        "discount_amount": str(discount_rupees),
+        "payable_amount": str(payable_rupees),
+        "currency": order.get("currency", "INR"),
+        "profile_id": profile.id,
+        "key": settings.API_ID,
+    }
+    if promo:
+        response.update({
+            "promo_code": promo.code,
+            "offer_id": promo.razorpay_offer_id,
+        })
+    return JsonResponse(response)
+
+
+====================================================================
+STEP 7 - cardapp/views.py VALIDATE PROMO
+====================================================================
+
+Add this function:
+
+def validate_promo_code(request):
+    amount_rupees = Decimal(str(settings.REGISTRATION_FEE))
+    promo_code = request.GET.get("promo_code") or request.POST.get("promo_code")
+
+    if not promo_code:
+        return JsonResponse({"status": "failed", "message": "Enter promo code."}, status=400)
+
+    profile = get_active_profile(request)
+
+    if not profile or profile.payment_status:
+        request.session.pop("current_profile_id", None)
+        request.session.pop("applied_promo_code", None)
+        return JsonResponse({"status": "failed", "message": "Complete Step 1 first."}, status=400)
+
+    promo, promo_error = validate_promo_for_profile(promo_code, profile, amount_rupees)
+    if promo_error:
+        return JsonResponse({"status": "failed", "message": promo_error}, status=400)
+
+    request.session["current_profile_id"] = profile.id
+    request.session["applied_promo_code"] = promo.code
+
+    discount_rupees, payable_rupees = calculate_promo_amounts(promo, amount_rupees)
+
+    return JsonResponse({
+        "status": "success",
+        "message": "Promo code applied.",
+        "promo_code": promo.code,
+        "offer_id": promo.razorpay_offer_id,
+        "original_amount": str(amount_rupees),
+        "discount_amount": str(discount_rupees),
+        "payable_amount": str(payable_rupees),
+        "profile_id": profile.id,
+    })
+
+
+====================================================================
+STEP 8 - cardapp/views.py VERIFY PAYMENT PROMO USAGE
+====================================================================
+
+In your verify_payment() function, after successful Razorpay signature verification,
+add this promo usage block.
+
+Important:
+If your old verify_payment() is different, do not blindly replace all payment-success code.
+Merge only the promo usage session block into the successful verification path.
+
+Minimum full version:
+
+@csrf_exempt
+def verify_payment(request):
+    if request.method != "POST":
+        return JsonResponse({"status": "invalid"})
+    if not razorpay_client:
+        return JsonResponse({"status": "failed", "message": "Razorpay package is not installed."}, status=500)
+
+    try:
+        razorpay_client.utility.verify_payment_signature({
+            "razorpay_order_id": request.POST.get("razorpay_order_id"),
+            "razorpay_payment_id": request.POST.get("razorpay_payment_id"),
+            "razorpay_signature": request.POST.get("razorpay_signature"),
+        })
+
+        order_id = request.POST.get("razorpay_order_id")
+        payment_id = request.POST.get("razorpay_payment_id")
+        order_profile_key = f"order_profile_{order_id}"
+        profile_id = clean_int_id(request.session.get(order_profile_key))
+        if not profile_id:
+            return JsonResponse({
+                "status": "failed",
+                "message": "Payment verified, but profile session expired. Please contact support.",
+            }, status=400)
+
+        request.session["current_profile_id"] = int(profile_id)
+        request.session["latest_profile_id"] = int(profile_id)
+        request.session[f"verified_payment_{payment_id}"] = int(profile_id)
+
+        promo_session_key = f"promo_order_{order_id}"
+        promo_data = request.session.get(promo_session_key)
+
+        if promo_data:
+            promo = PromoCode.objects.filter(id=promo_data.get("promo_id")).first()
+            profile = UserProfile.objects.filter(id=promo_data.get("profile_id")).first()
+
+            if promo and profile:
+                PromoCodeUsage.objects.get_or_create(
+                    promo_code=promo,
+                    profile=profile,
+                    defaults={
+                        "razorpay_offer_id": promo.razorpay_offer_id,
+                        "razorpay_order_id": order_id,
+                        "razorpay_payment_id": payment_id,
+                        "amount": Decimal(str(promo_data.get("amount", settings.REGISTRATION_FEE))),
+                    },
+                )
+
+            del request.session[promo_session_key]
+
+        if order_profile_key in request.session:
+            del request.session[order_profile_key]
+
+        return JsonResponse({"status": "success", "profile_id": profile_id})
+
+    except SignatureVerificationError:
+        return JsonResponse({"status": "failed"})
+
+
+====================================================================
+STEP 9 - cardapp/views.py MANAGER PROMO PAGES
+====================================================================
+
+If your old build already has manager login/dashboard helpers, add only the promo views.
+If these helper functions are missing, add them too.
+
+Helper functions:
+
+def apply_date_filters(queryset, request, date_field="created_at"):
+    start_date = parse_date(request.GET.get("start_date") or "")
+    end_date = parse_date(request.GET.get("end_date") or "")
+
+    if start_date:
+        queryset = queryset.filter(**{f"{date_field}__date__gte": start_date})
+    if end_date:
+        queryset = queryset.filter(**{f"{date_field}__date__lte": end_date})
+
+    return queryset
+
+
+def paginate_items(request, queryset, per_page=15):
+    page = request.GET.get("page", 1)
+    paginator = Paginator(queryset, per_page)
+    return paginator.get_page(page)
+
+
+def parse_manager_datetime(value):
+    if not value:
+        return None
+    parsed = parse_datetime(value)
+    if parsed and timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed)
+    return parsed
+
+
+def AdminManagerRole(user):
+    return user.is_active and user.is_staff
+
+
+Promo manager views:
+
+@user_passes_test(AdminManagerRole, login_url="/manager/login/")
+def manager_promo_codes(request, promo_id=None):
+    promo = PromoCode.objects.filter(id=promo_id).first() if promo_id else None
+
+    if request.method == "POST":
+        code = (request.POST.get("code") or "").strip().upper()
+        razorpay_offer_id = (request.POST.get("razorpay_offer_id") or "").strip()
+        discount_type = request.POST.get("discount_type") or PromoCode.DISCOUNT_FLAT
+        discount_value = Decimal(request.POST.get("discount_value") or "0")
+        max_discount_amount = request.POST.get("max_discount_amount") or None
+        minimum_order_amount = Decimal(request.POST.get("minimum_order_amount") or "0")
+        max_uses_total = request.POST.get("max_uses_total") or None
+        max_uses_per_user = request.POST.get("max_uses_per_user") or 1
+        is_active = request.POST.get("is_active") == "on"
+
+        if not promo:
+            promo = PromoCode()
+
+        promo.code = code
+        promo.razorpay_offer_id = razorpay_offer_id
+        promo.discount_type = discount_type
+        promo.discount_value = discount_value
+        promo.max_discount_amount = Decimal(max_discount_amount) if max_discount_amount else None
+        promo.minimum_order_amount = minimum_order_amount
+        promo.max_uses_total = int(max_uses_total) if max_uses_total else None
+        promo.max_uses_per_user = int(max_uses_per_user)
+        promo.valid_from = parse_manager_datetime(request.POST.get("valid_from"))
+        promo.valid_until = parse_manager_datetime(request.POST.get("valid_until"))
+        promo.is_active = is_active
+        promo.save()
+        messages.success(request, "Promo code saved successfully.")
+        return redirect("manager_promo_codes")
+
+    contexts = {
+        "active_tab": "promo_codes",
+        "promo": promo,
+        "promo_codes": PromoCode.objects.all(),
+        "discount_type_choices": PromoCode.DISCOUNT_TYPE_CHOICES,
+    }
+    return render(request, "manager/promo_codes.html", contexts)
+
+
+@user_passes_test(AdminManagerRole, login_url="/manager/login/")
+def manager_promo_usage(request):
+    usages = PromoCodeUsage.objects.select_related("promo_code", "profile").all()
+    usages = apply_date_filters(usages, request, "used_at")
+    code = (request.GET.get("code") or "").strip()
+    payment_id = (request.GET.get("payment_id") or "").strip()
+    order_id = (request.GET.get("order_id") or "").strip()
+
+    if code:
+        usages = usages.filter(promo_code__code__icontains=code)
+    if payment_id:
+        usages = usages.filter(razorpay_payment_id__icontains=payment_id)
+    if order_id:
+        usages = usages.filter(razorpay_order_id__icontains=order_id)
+
+    contexts = {
+        "active_tab": "promo_usage",
+        "page_items": paginate_items(request, usages),
+    }
+    return render(request, "manager/promo_usage.html", contexts)
+
+
+Optional dashboard summary addition:
+Inside manager_dashboard(), add:
+
+promo_usage_amount = PromoCodeUsage.objects.aggregate(total=Sum("amount")).get("total") or Decimal("0")
+
+And pass it in context:
+
+"promo_usage_amount": promo_usage_amount,
+
+
+====================================================================
+STEP 10 - cardapp/templates/nk_appform.html STEP 3 HTML
+====================================================================
+
+Inside Step 3, before the hidden razorpay_payment_id input, add this:
+
+<div class="AEP-OneSection promo-code-row">
+    <span>
+        <input type="text" id="promo_code" name="promo_code" placeholder="Enter promo code">
+    </span>
+    <button type="button" id="applyPromoBtn" class="Common-Btn" onclick="applyPromoCode(this)">Apply</button>
+</div>
+<p id="promoMessage" style="display:none;"></p>
+
+
+Make sure Pay Now button calls:
+
+<button type="button" id="payNowBtn" class="Common-Btn" onclick="startPayment(this)">Pay Now</button>
+
+
+====================================================================
+STEP 11 - cardapp/templates/nk_appform.html JAVASCRIPT
+====================================================================
+
+Replace the old Razorpay JS block with this one, or merge these functions into existing script.
+
+let paymentInProgress = false;
+let rzpInstance = null;
+let promoApplied = false;
+
+function getPromoParams(){
+    return new URLSearchParams({
+        profile_id: document.getElementById("profile_id").value || "",
+        public_username: document.querySelector("[name='public_username']")?.value || "",
+        contct_num: document.querySelector("[name='contct_num']")?.value || "",
+        promo_code: document.getElementById("promo_code").value || ""
+    });
+}
+
+function parseJsonResponse(res){
+    return res.text().then(text => {
+        let data = {};
+
+        try {
+            data = text ? JSON.parse(text) : {};
+        } catch (e) {
+            throw new Error("Server returned an HTML error page. Please restart Django and check the terminal error.");
+        }
+
+        if(!res.ok){
+            throw new Error(data.message || "Request failed.");
+        }
+
+        return data;
+    });
+}
+
+function applyPromoCode(btn){
+    const promoInput = document.getElementById("promo_code");
+
+    if(!promoInput.value.trim()){
+        showPromoMessage("Enter promo code.", false);
+        return;
+    }
+
+    btn.disabled = true;
+    btn.innerText = "Checking...";
+
+    fetch("/validate-promo/?" + getPromoParams().toString())
+    .then(parseJsonResponse)
+    .then(data => {
+        promoApplied = true;
+        if(data.profile_id){
+            document.getElementById("profile_id").value = data.profile_id;
+        }
+        promoInput.value = data.promo_code || promoInput.value;
+        showPromoMessage(data.message || "Promo code applied.", true);
+    })
+    .catch(err => {
+        promoApplied = false;
+        showPromoMessage(err.message || "Invalid promo code.", false);
+    })
+    .finally(() => {
+        btn.disabled = false;
+        btn.innerText = "Apply";
+    });
+}
+
+function startPayment(btn){
+
+    if(paymentInProgress) return;
+
+    paymentInProgress = true;
+    btn.disabled = true;
+    btn.innerText = "Processing...";
+
+    const params = getPromoParams();
+
+    fetch("/create-order/?" + params.toString())
+    .then(parseJsonResponse)
+    .then(data => {
+        showPromoMessage(data.promo_code ? "Promo code applied." : "", true);
+
+        const options = {
+            key: data.key,
+            amount: data.amount,
+            currency: data.currency || "INR",
+            order_id: data.order_id,
+
+            name: "Pixelstat eSolution",
+            description: "1 Year Access",
+            prefill: {
+                name: document.querySelector("[name='name']")?.value || "",
+                email: document.querySelector("[name='email_Id']")?.value || "",
+                contact: document.querySelector("[name='contct_num']")?.value || ""
+            },
+
+            handler: function(response){
+                verifyPayment(response);
+            },
+
+            modal: {
+                ondismiss: function(){
+                    sendPaymentFailed();
+                    resetPaymentButton(btn);
+                    rzpInstance = null;
+                }
+            },
+
+            config: {
+                display: {
+                    blocks: {
+                        upi_preferred: {
+                            name: "Pay via UPI",
+                            instruments: [
+                                {
+                                    method: "upi"
+                                }
+                            ]
+                        }
+                    },
+                    sequence: ["block.upi_preferred", "card", "wallet", "netbanking"],
+                    preferences: {
+                        show_default_blocks: true
+                    }
+                }
+            }
+        };
+
+        rzpInstance = new Razorpay(options);
+        rzpInstance.open();
+
+    })
+    .catch(err=>{
+        console.error(err);
+        showPromoMessage(err.message || "Payment failed to start", false);
+        resetPaymentButton(btn);
+    });
+}
+
+function showPromoMessage(message, isSuccess){
+    const promoMessage = document.getElementById("promoMessage");
+    if(!promoMessage) return;
+
+    if(!message){
+        promoMessage.style.display = "none";
+        promoMessage.innerText = "";
+        return;
+    }
+
+    promoMessage.style.display = "block";
+    promoMessage.innerText = message;
+    promoMessage.style.color = isSuccess ? "green" : "red";
+    promoMessage.style.textAlign = "center";
+    promoMessage.style.fontSize = "24px";
+    promoMessage.style.margin = "12px 0 28px";
+}
+
+function sendPaymentFailed(){
+
+    fetch("/create/", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: new URLSearchParams({
+            step: "3",
+            profile_id: document.getElementById("profile_id").value,
+            payment_failed: "true"
+        })
+    });
+}
+
+function verifyPayment(response){
+
+    fetch("/verify-payment/", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body:
+            "razorpay_payment_id=" + response.razorpay_payment_id +
+            "&razorpay_order_id=" + response.razorpay_order_id +
+            "&razorpay_signature=" + response.razorpay_signature
+    })
+    .then(parseJsonResponse)
+    .then(data => {
+
+        if(data.status === "success"){
+
+            if(rzpInstance) rzpInstance.close();
+
+            let form = document.getElementById("mainForm");
+
+            if(data.profile_id){
+                document.getElementById("profile_id").value = data.profile_id;
+            }
+
+            let input = document.createElement("input");
+            input.type = "hidden";
+            input.name = "razorpay_payment_id";
+            input.value = response.razorpay_payment_id;
+
+            form.appendChild(input);
+
+            document.getElementById("step").value = "3";
+            form.submit();
+
+        } else {
+            alert("Payment verification failed");
+        }
+    });
+}
+
+function resetPaymentButton(btn){
+    paymentInProgress = false;
+    if(btn){
+        btn.disabled = false;
+        btn.innerText = "Pay Now";
+    }
+}
+
+
+Keep this script include near the end of page:
+
+<script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+
+
+====================================================================
+STEP 12 - cardapp/templates/nk_appform.html CSS
+====================================================================
+
+Add this CSS near bottom of file:
+
+<style>
+.promo-code-row {
+    align-items: stretch;
+    display: flex;
+    gap: 10px;
+    margin: 18px auto 0;
+    max-width: 900px;
+    width: 100%;
+}
+
+.promo-code-row span {
+    flex: 1;
+}
+
+.promo-code-row input {
+    box-sizing: border-box;
+    height: 44px;
+    width: 100% !important;
+}
+
+.promo-code-row #applyPromoBtn {
+    height: 44px;
+    margin: 0;
+    min-width: 120px;
+}
+
+@media (max-width: 640px) {
+    .promo-code-row {
+        flex-direction: column;
+    }
+
+    .promo-code-row #applyPromoBtn {
+        width: 100%;
+    }
+}
+</style>
+
+
+====================================================================
+STEP 13 - cardapp/templates/manager/base_admin.html
+====================================================================
+
+Add these menu links in the manager sidebar/menu where other manager links exist:
+
+<a class="{% if active_tab == 'promo_codes' %}active{% endif %}" href="{% url 'manager_promo_codes' %}">Promo Code Add</a>
+<a class="{% if active_tab == 'promo_usage' %}active{% endif %}" href="{% url 'manager_promo_usage' %}">Promo Code Usage</a>
+
+
+====================================================================
+STEP 14 - cardapp/templates/manager/promo_codes.html
+====================================================================
+
+Create new file:
+cardapp/templates/manager/promo_codes.html
+
+Paste this full code:
+
+{% extends "manager/base_admin.html" %}
+
+{% block breadcrumb %}Promo Code Add{% endblock %}
+
+{% block content %}
+<div class="Panel">
+    <h2>{% if promo %}Edit Promo Code{% else %}Add Promo Code{% endif %}</h2>
+    <form method="post">
+        {% csrf_token %}
+        <div class="Search-Filter-Container">
+            <div style="display:grid; gap:10px; grid-template-columns:repeat(auto-fit, minmax(190px, 1fr));">
+                <input type="text" name="code" value="{{ promo.code|default:'' }}" placeholder="Code" required>
+                <div>
+                    <input type="text" name="razorpay_offer_id" value="{{ promo.razorpay_offer_id|default:'' }}" placeholder="Razorpay Offer ID" required>
+                    <small style="display:block; margin-top:5px; color:#666;">Create/use an offer whose Applicable On payment method includes UPI. Razorpay offers cannot be edited after creation.</small>
+                </div>
+                <select name="discount_type" required>
+                    {% for value, label in discount_type_choices %}
+                        <option value="{{ value }}" {% if promo.discount_type == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+                <input type="number" step="0.01" name="discount_value" value="{{ promo.discount_value|default:'' }}" placeholder="Discount Value" required>
+                <input type="number" step="0.01" name="max_discount_amount" value="{{ promo.max_discount_amount|default:'' }}" placeholder="Max Discount Amount">
+                <input type="number" step="0.01" name="minimum_order_amount" value="{{ promo.minimum_order_amount|default:'0' }}" placeholder="Minimum Order Amount">
+                <input type="number" name="max_uses_total" value="{{ promo.max_uses_total|default:'' }}" placeholder="Max Uses Total">
+                <input type="number" name="max_uses_per_user" value="{{ promo.max_uses_per_user|default:'1' }}" placeholder="Max Uses Per User">
+                <input type="datetime-local" name="valid_from" value="{{ promo.valid_from|date:'Y-m-d\\TH:i' }}" placeholder="Valid From">
+                <input type="datetime-local" name="valid_until" value="{{ promo.valid_until|date:'Y-m-d\\TH:i' }}" placeholder="Valid Until">
+                <label style="align-items:center; display:flex; gap:8px;">
+                    <input type="checkbox" name="is_active" style="width:auto;" {% if promo.is_active or not promo %}checked{% endif %}>
+                    Active
+                </label>
+                <button class="Admin-Btn" type="submit"><i class="fa fa-save"></i> Save Promo Code</button>
+            </div>
+        </div>
+    </form>
+</div>
+
+<div class="Panel">
+    <h2>Promo Codes</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Code</th>
+                <th>Razorpay Offer ID</th>
+                <th>Discount Type</th>
+                <th>Discount Value</th>
+                <th>Max Per User</th>
+                <th>Status</th>
+                <th>Valid From</th>
+                <th>Valid Until</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for code in promo_codes %}
+            <tr>
+                <td>{{ code.code }}</td>
+                <td>{{ code.razorpay_offer_id }}</td>
+                <td>{{ code.get_discount_type_display }}</td>
+                <td>{{ code.discount_value }}</td>
+                <td>{{ code.max_uses_per_user }}</td>
+                <td>
+                    {% if code.is_active %}
+                        <span class="Status success">Active</span>
+                    {% else %}
+                        <span class="Status closed">Inactive</span>
+                    {% endif %}
+                </td>
+                <td>{{ code.valid_from|date:"d M Y, h:i A"|default:"-" }}</td>
+                <td>{{ code.valid_until|date:"d M Y, h:i A"|default:"-" }}</td>
+                <td><a class="Admin-Btn secondary" href="{% url 'manager_promo_code_edit' code.id %}">Edit</a></td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="9">No promo codes found.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+
+
+====================================================================
+STEP 15 - cardapp/templates/manager/promo_usage.html
+====================================================================
+
+Create new file:
+cardapp/templates/manager/promo_usage.html
+
+Paste this full code:
+
+{% extends "manager/base_admin.html" %}
+
+{% block breadcrumb %}Promo Code Usage{% endblock %}
+
+{% block content %}
+<div class="Search-Filter-Container">
+    <form action="" method="get">
+        <input placeholder="Start Date" type="text" name="start_date" value="{{ request.GET.start_date }}" onfocus="this.type='date'" onblur="if(!this.value){this.type='text'}">
+        <input placeholder="End Date" type="text" name="end_date" value="{{ request.GET.end_date }}" onfocus="this.type='date'" onblur="if(!this.value){this.type='text'}">
+        <input type="text" name="code" value="{{ request.GET.code }}" placeholder="Promo Code">
+        <input type="text" name="order_id" value="{{ request.GET.order_id }}" placeholder="Order ID">
+        <input type="text" name="payment_id" value="{{ request.GET.payment_id }}" placeholder="Payment ID">
+        <button class="Admin-Btn" type="submit"><i class="fa fa-search"></i> Search</button>
+    </form>
+</div>
+
+<div class="Panel">
+    <h2>Promo Code Usage</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>S.No.</th>
+                <th>Code</th>
+                <th>Customer Name</th>
+                <th>Contact No.</th>
+                <th>Razorpay Offer ID</th>
+                <th>Order ID</th>
+                <th>Payment ID</th>
+                <th>Amount</th>
+                <th>Used At</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for usage in page_items %}
+            <tr>
+                <td>{{ forloop.counter }}</td>
+                <td>{{ usage.promo_code.code }}</td>
+                <td>{{ usage.profile.full_name }}</td>
+                <td>{{ usage.profile.phone }}</td>
+                <td>{{ usage.razorpay_offer_id }}</td>
+                <td>{{ usage.razorpay_order_id }}</td>
+                <td>{{ usage.razorpay_payment_id }}</td>
+                <td>Rs {{ usage.amount }}</td>
+                <td>{{ usage.used_at|date:"d M Y, h:i A" }}</td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="9">No promo usage found.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div class="Pagination">
+        {% if page_items.has_previous %}
+            <a href="?page={{ page_items.previous_page_number }}&start_date={{ request.GET.start_date }}&end_date={{ request.GET.end_date }}&code={{ request.GET.code }}&order_id={{ request.GET.order_id }}&payment_id={{ request.GET.payment_id }}">Prev</a>
+        {% endif %}
+        <span>Page {{ page_items.number }} of {{ page_items.paginator.num_pages }}</span>
+        {% if page_items.has_next %}
+            <a href="?page={{ page_items.next_page_number }}&start_date={{ request.GET.start_date }}&end_date={{ request.GET.end_date }}&code={{ request.GET.code }}&order_id={{ request.GET.order_id }}&payment_id={{ request.GET.payment_id }}">Next</a>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+
+
+====================================================================
+STEP 16 - cardapp/templates/manager/profiles.html OPTIONAL COLUMNS
+====================================================================
+
+If you want manager completed/pending profile list to show coupon code and final amount,
+add these columns in the table header:
+
+<th>Discount Applied</th>
+<th>Final Paid Amount</th>
+
+
+Add this in each profile row:
+
+<td>
+    {% if profile.promo_usages.first %}
+        {{ profile.promo_usages.first.promo_code.code }}
+    {% else %}
+        -
+    {% endif %}
+</td>
+<td>
+    {% if profile.promo_usages.first %}
+        Rs {{ profile.promo_usages.first.amount }}
+    {% else %}
+        Rs {{ REGISTRATION_FEE|default:"1000" }}
+    {% endif %}
+</td>
+
+
+====================================================================
+STEP 17 - cardapp/templates/manager/dashboard.html OPTIONAL SUMMARY
+====================================================================
+
+If manager dashboard has amount cards, add a promo usage card:
+
+<div class="Dashboard-Card">
+    <span>Promo Usage Amount</span>
+    <strong>Rs {{ promo_usage_amount }}</strong>
+</div>
+
+
+Use whatever class structure your old dashboard already uses.
+The key variable from views.py is:
+promo_usage_amount
+
+
+====================================================================
+STEP 18 - cardapp/tests.py OPTIONAL TESTS
+====================================================================
+
+These tests are optional but useful after integration.
+Add imports:
+
+from unittest.mock import Mock, patch
+from django.test import TestCase, override_settings
+from .models import PromoCode, UserProfile
+
+
+Promo tests:
+
+class RazorpayPromoCodeTests(TestCase):
+    def make_profile(self, **overrides):
+        data = {
+            "full_name": "Promo User",
+            "public_username": "promouser",
+            "phone": 9876543210,
+            "personal_insta_url": "",
+            "personal_facebook_url": "",
+            "personal_linked_url": "",
+            "personal_twitter_url": "",
+            "payment_status": False,
+        }
+        data.update(overrides)
+        return UserProfile.objects.create(**data)
+
+    @override_settings(REGISTRATION_FEE=1000)
+    def test_create_order_attaches_forced_offer_without_double_discounting(self):
+        profile = self.make_profile(public_username="promouser")
+        promo = PromoCode.objects.create(
+            code="UPI25",
+            razorpay_offer_id="offer_test_upi25",
+            discount_type=PromoCode.DISCOUNT_PERCENT,
+            discount_value="25",
+            minimum_order_amount="0",
+        )
+        session = self.client.session
+        session["current_profile_id"] = profile.id
+        session.save()
+
+        razorpay_client = Mock()
+        razorpay_client.order.create.return_value = {
+            "id": "order_discounted",
+            "currency": "INR",
+        }
+
+        with patch("cardapp.views.razorpay_client", razorpay_client):
+            response = self.client.get("/create-order/", {"promo_code": promo.code})
+
+        self.assertEqual(response.status_code, 200)
+        payload = razorpay_client.order.create.call_args.args[0]
+        self.assertEqual(payload["amount"], 100000)
+        self.assertEqual(payload["offers"], [promo.razorpay_offer_id])
+        self.assertIs(payload["force_offer"], True)
+        self.assertEqual(response.json()["amount"], 100000)
+        self.assertEqual(response.json()["discount_amount"], "250.00")
+        self.assertEqual(response.json()["payable_amount"], "750.00")
+
+    @override_settings(REGISTRATION_FEE=1000)
+    def test_create_order_without_coupon_ignores_previous_session_promo(self):
+        profile = self.make_profile(public_username="nopromouser")
+        PromoCode.objects.create(
+            code="OLDPROMO",
+            razorpay_offer_id="offer_oldpromo",
+            discount_type=PromoCode.DISCOUNT_PERCENT,
+            discount_value="99",
+            minimum_order_amount="0",
+        )
+        session = self.client.session
+        session["current_profile_id"] = profile.id
+        session["applied_promo_code"] = "OLDPROMO"
+        session.save()
+
+        razorpay_client = Mock()
+        razorpay_client.order.create.return_value = {
+            "id": "order_without_promo",
+            "currency": "INR",
+        }
+
+        with patch("cardapp.views.razorpay_client", razorpay_client):
+            response = self.client.get("/create-order/")
+
+        self.assertEqual(response.status_code, 200)
+        payload = razorpay_client.order.create.call_args.args[0]
+        self.assertEqual(payload["amount"], 100000)
+        self.assertNotIn("offers", payload)
+        self.assertNotIn("force_offer", payload)
+        self.assertEqual(response.json()["discount_amount"], "0.00")
+        self.assertEqual(response.json()["payable_amount"], "1000")
+
+
+====================================================================
+STEP 19 - pixyproject/settings.py CHECK
+====================================================================
+
+Make sure these already exist:
+
+REGISTRATION_FEE = 1000
+API_ID = "your_razorpay_key_id"
+API_SECRET = "your_razorpay_key_secret"
+
+Use your live/test Razorpay keys as needed.
+
+
+====================================================================
+STEP 20 - AFTER COPYING CHECKLIST
+====================================================================
+
+1. Run:
+python manage.py makemigrations
+python manage.py migrate
+
+2. Create Razorpay offer in Razorpay Dashboard:
+- Coupon-only behavior: do not enable default/show-on-checkout.
+- Applicable On must include UPI if UPI discount is needed.
+- Copy Razorpay offer_id.
+
+3. Add promo in manager page:
+/manager/promo-codes/
+
+Example:
+- Code: CONF99
+- Razorpay Offer ID: offer_xxxxx
+- Discount Type: Percent
+- Discount Value: 99
+- Minimum Order Amount: 0 or 1
+- Max Uses Per User: 1
+- Active: checked
+
+4. Test cases manually:
+- No coupon: checkout should show full Rs 1000.
+- CONF99: checkout should show Rs 10.
+- Another coupon: checkout should show amount according to that Razorpay offer.
+- Razorpay Dashboard Offer Usage should increase after successful payment.
+- Local manager page /manager/promo-usage/ should show usage after payment success.
+
+5. Run:
+python manage.py check
+python manage.py test cardapp
+
