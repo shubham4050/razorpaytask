@@ -1,0 +1,1636 @@
+
+==================================================================
+README / HOW TO USE
+==================================================================
+
+ADMIN DASHBOARD DATA - FILEWISE COPY PASTE GUIDE
+Prepared from current working build: D:\ABCD\Workflow ppt
+Reference checked: C:\Users\RDRL\Downloads\task001.txt
+Date: 2026-05-17
+
+Purpose:
+Use this file to move the admin dashboard functionality into another build.
+It includes the current working code for admin login/dashboard, completed/pending profiles,
+queries, query detail/status update, promo code admin, promo usage, admin templates, and URLs.
+
+Important compatibility note for task001.txt:
+The old task001.txt code uses Query, proof, and view_query.
+This current working build uses CustomerQuery, proof_of_evidence, and manager_view_query.
+If your target build still uses task001 names, either rename the target build to this current style,
+or replace names while copying:
+- CustomerQuery -> Query
+- proof_of_evidence -> proof
+- manager_view_query -> view_query
+- manager/queries/<int:query_id>/ -> manager/view-query/<int:query_id>/ if keeping old URL
+
+Recommended integration order:
+1. Add/update models first.
+2. Run makemigrations and migrate.
+3. Add/update admin.py.
+4. Add/update views.py helper/admin functions.
+5. Add/update pixyproject/urls.py routes.
+6. Copy manager templates.
+7. Run python manage.py check.
+8. Login as staff user and test admin dashboard pages.
+
+==================================================================
+cardapp/models.py - CustomerQuery, PromoCode, PromoCodeUsage
+==================================================================
+
+FILE: cardapp\models.py
+LINES: 159-267
+
+```
+class CustomerQuery(models.Model):
+    QUERY_TYPE_CHOICES = [
+        ("payment", "Payment"),
+        ("card_update", "Card Update"),
+        ("login_otp", "Login / OTP"),
+        ("cancellation", "Cancellation / Refund"),
+        ("other", "Other"),
+    ]
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("in_process", "In Process"),
+        ("resolved", "Resolved"),
+        ("closed", "Closed"),
+    ]
+
+    query_id = models.CharField(max_length=20, unique=True, blank=True)
+    name = models.CharField(max_length=100, blank=True, null=True)
+    contact_no = models.CharField(max_length=15)
+    query_type = models.CharField(max_length=30, choices=QUERY_TYPE_CHOICES, default="payment")
+    message = models.TextField(blank=True, null=True)
+    proof_of_evidence = models.FileField(upload_to="query_evidence/", blank=True, null=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    admin_name = models.CharField(max_length=100, blank=True, null=True)
+    admin_comment = models.TextField(blank=True, null=True)
+    admin_proof = models.FileField(upload_to="query_resolution/", blank=True, null=True)
+    resolved_date = models.DateTimeField(blank=True, null=True)
+    query_date = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-query_date"]
+        verbose_name = "Customer Query"
+        verbose_name_plural = "Customer Queries"
+
+    def __str__(self):
+        return f"{self.query_id} - {self.contact_no}"
+
+    def save(self, *args, **kwargs):
+        if not self.query_id:
+            last_query = CustomerQuery.objects.order_by("-id").first()
+            next_id = 1
+            if last_query and last_query.query_id:
+                last_number = "".join(filter(str.isdigit, last_query.query_id))
+                if last_number:
+                    next_id = int(last_number) + 1
+            self.query_id = f"QRY{next_id:05d}"
+        super().save(*args, **kwargs)
+
+
+class PromoCode(models.Model):
+    DISCOUNT_FLAT = "flat"
+    DISCOUNT_PERCENT = "percent"
+    DISCOUNT_TYPE_CHOICES = [
+        (DISCOUNT_FLAT, "Flat"),
+        (DISCOUNT_PERCENT, "Percent"),
+    ]
+
+    code = models.CharField(max_length=50, unique=True)
+    razorpay_offer_id = models.CharField(max_length=100, unique=True)
+    discount_type = models.CharField(max_length=10, choices=DISCOUNT_TYPE_CHOICES)
+    discount_value = models.DecimalField(max_digits=10, decimal_places=2)
+    max_discount_amount = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
+    minimum_order_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    max_uses_total = models.PositiveIntegerField(blank=True, null=True)
+    max_uses_per_user = models.PositiveIntegerField(default=1)
+    valid_from = models.DateTimeField(blank=True, null=True)
+    valid_until = models.DateTimeField(blank=True, null=True)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["code"]
+
+    def __str__(self):
+        return self.code
+
+    def is_available_now(self):
+        now = timezone.now()
+        if not self.is_active:
+            return False, "Promo code is inactive."
+        if self.valid_from and now < self.valid_from:
+            return False, "Promo code is not active yet."
+        if self.valid_until and now > self.valid_until:
+            return False, "Promo code has expired."
+        if self.max_uses_total and self.usages.count() >= self.max_uses_total:
+            return False, "Promo code usage limit is over."
+        return True, ""
+
+
+class PromoCodeUsage(models.Model):
+    promo_code = models.ForeignKey(PromoCode, related_name="usages", on_delete=models.PROTECT)
+    profile = models.ForeignKey(UserProfile, related_name="promo_usages", on_delete=models.CASCADE)
+    razorpay_offer_id = models.CharField(max_length=100)
+    razorpay_order_id = models.CharField(max_length=100)
+    razorpay_payment_id = models.CharField(max_length=100, unique=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    used_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-used_at"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["promo_code", "profile"],
+                name="unique_promo_code_per_profile",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.profile} - {self.promo_code}"
+```
+
+==================================================================
+cardapp/admin.py - admin registrations
+==================================================================
+
+FILE: cardapp\admin.py
+
+```
+from django.contrib import admin
+from .models import *
+admin.site.register(Contact_team)
+admin.site.register(UserProfile)
+
+
+@admin.register(CustomerQuery)
+class CustomerQueryAdmin(admin.ModelAdmin):
+    list_display = (
+        "query_id",
+        "contact_no",
+        "name",
+        "query_type",
+        "query_date",
+        "status",
+    )
+    search_fields = ("query_id", "contact_no", "name", "message")
+    list_filter = ("query_type", "status", "query_date")
+    readonly_fields = ("query_id", "query_date", "updated_at", "resolved_date")
+    ordering = ("-query_date",)
+
+
+@admin.register(PromoCode)
+class PromoCodeAdmin(admin.ModelAdmin):
+    list_display = (
+        "code",
+        "razorpay_offer_id",
+        "discount_type",
+        "discount_value",
+        "max_uses_per_user",
+        "is_active",
+    )
+    search_fields = ("code", "razorpay_offer_id")
+    list_filter = ("discount_type", "is_active")
+
+
+@admin.register(PromoCodeUsage)
+class PromoCodeUsageAdmin(admin.ModelAdmin):
+    list_display = (
+        "promo_code",
+        "profile",
+        "razorpay_offer_id",
+        "razorpay_order_id",
+        "razorpay_payment_id",
+        "used_at",
+    )
+    search_fields = (
+        "promo_code__code",
+        "profile__full_name",
+        "razorpay_offer_id",
+        "razorpay_order_id",
+        "razorpay_payment_id",
+    )
+    list_filter = ("promo_code", "used_at")
+    readonly_fields = ("used_at",)
+
+# # Register your models here.
+# from django.contrib import admin
+# from .models import UserProfile, SocialLink, Service, Branch
+
+# # ---------------------------
+# # USER PROFILE ADMIN
+# # ---------------------------
+# @admin.register(UserProfile)
+# class UserProfileAdmin(admin.ModelAdmin):
+#     list_display = ("full_name", "title", "email", "phone", "avatar_tag")
+#     readonly_fields = ("avatar_tag",)
+# class BranchInline(admin.TabularInline):
+#     model = Branch
+#     extra = 1  # how many empty forms to show
+#     fields = ('name',)
+
+# # ---------------------------
+# # SOCIAL LINK ADMIN
+# # ---------------------------
+# @admin.register(SocialLink)
+# class SocialLinkAdmin(admin.ModelAdmin):
+#     list_display = ("profile", "platform", "url")
+
+
+# # ---------------------------
+# # SERVICE ADMIN
+# # ---------------------------
+# @admin.register(Service)
+# class ServiceAdmin(admin.ModelAdmin):
+#     list_display = ("profile", "title", "image_tag")
+#     readonly_fields = ("image_tag",)
+```
+
+==================================================================
+cardapp/views.py - admin dashboard/helper/views
+==================================================================
+
+FILE: cardapp\views.py
+LINES: 1455-1703
+
+```
+def AdminManagerRole(user):
+    return user.is_active and user.is_staff
+
+
+def manager_login(request):
+    if request.user.is_authenticated and request.user.is_staff:
+        return redirect("manager_dashboard")
+
+    next_url = request.GET.get("next") or request.POST.get("next") or "manager_dashboard"
+
+    if request.method == "POST":
+        username = request.POST.get("username", "").strip()
+        password = request.POST.get("password", "")
+        user = authenticate(request, username=username, password=password)
+
+        if user and user.is_active and user.is_staff:
+            login(request, user)
+            return redirect(next_url)
+
+        messages.error(request, "Invalid manager login details.")
+
+    return render(request, "manager/login.html", {"next": next_url})
+
+
+def manager_logout(request):
+    logout(request)
+    return redirect("manager_login")
+
+
+def apply_date_filters(queryset, request, date_field="created_at"):
+    start_date = parse_date(request.GET.get("start_date") or "")
+    end_date = parse_date(request.GET.get("end_date") or "")
+
+    if start_date:
+        queryset = queryset.filter(**{f"{date_field}__date__gte": start_date})
+    if end_date:
+        queryset = queryset.filter(**{f"{date_field}__date__lte": end_date})
+
+    return queryset
+
+
+def paginate_items(request, queryset, per_page=15):
+    page = request.GET.get("page", 1)
+    paginator = Paginator(queryset, per_page)
+    return paginator.get_page(page)
+
+
+def filter_profiles(request, queryset):
+    queryset = apply_date_filters(queryset, request, "created_at")
+    contact_no = (request.GET.get("contact_no") or "").strip()
+    payment_id = (request.GET.get("payment_id") or "").strip()
+    public_username = (request.GET.get("public_username") or "").strip()
+
+    if contact_no:
+        queryset = queryset.filter(phone__icontains=contact_no)
+    if payment_id:
+        queryset = queryset.filter(razorpay_payment_id__icontains=payment_id)
+    if public_username:
+        queryset = queryset.filter(public_username__icontains=public_username)
+
+    return queryset.order_by("-created_at")
+
+
+@user_passes_test(AdminManagerRole, login_url="/manager/login/")
+def manager_dashboard(request):
+    total_profiles = UserProfile.objects.count()
+    completed_profiles = UserProfile.objects.filter(payment_status=True).count()
+    pending_profiles = UserProfile.objects.filter(payment_status=False).count()
+    total_queries = CustomerQuery.objects.count()
+    promo_usage_amount = PromoCodeUsage.objects.aggregate(total=Sum("amount")).get("total") or Decimal("0")
+    completed_amount = Decimal(completed_profiles) * Decimal(str(settings.REGISTRATION_FEE))
+    pending_amount = Decimal(pending_profiles) * Decimal(str(settings.REGISTRATION_FEE))
+
+    contexts = {
+        "active_tab": "dashboard",
+        "total_profiles": total_profiles,
+        "completed_profiles": completed_profiles,
+        "pending_profiles": pending_profiles,
+        "total_queries": total_queries,
+        "completed_amount": completed_amount,
+        "pending_amount": pending_amount,
+        "promo_usage_amount": promo_usage_amount,
+        "recent_queries": CustomerQuery.objects.all()[:5],
+        "recent_completed": UserProfile.objects.filter(payment_status=True).order_by("-created_at")[:5],
+    }
+    return render(request, "manager/dashboard.html", contexts)
+
+
+@user_passes_test(AdminManagerRole, login_url="/manager/login/")
+def manager_completed(request):
+    profiles = filter_profiles(request, UserProfile.objects.filter(payment_status=True))
+    contexts = {
+        "active_tab": "completed",
+        "title": "Completed",
+        "is_completed": True,
+        "page_items": paginate_items(request, profiles),
+        "REGISTRATION_FEE": settings.REGISTRATION_FEE,
+    }
+    return render(request, "manager/profiles.html", contexts)
+
+
+@user_passes_test(AdminManagerRole, login_url="/manager/login/")
+def manager_pending(request):
+    profiles = filter_profiles(request, UserProfile.objects.filter(payment_status=False))
+    contexts = {
+        "active_tab": "pending",
+        "title": "Pending",
+        "is_pending": True,
+        "page_items": paginate_items(request, profiles),
+        "REGISTRATION_FEE": settings.REGISTRATION_FEE,
+    }
+    return render(request, "manager/profiles.html", contexts)
+
+
+@user_passes_test(AdminManagerRole, login_url="/manager/login/")
+def manager_queries(request):
+    queries = CustomerQuery.objects.all()
+    queries = apply_date_filters(queries, request, "query_date")
+    contact_no = (request.GET.get("contact_no") or "").strip()
+    status = (request.GET.get("status") or "").strip()
+    query_type = (request.GET.get("query_type") or "").strip()
+
+    if contact_no:
+        queries = queries.filter(contact_no__icontains=contact_no)
+    if status:
+        queries = queries.filter(status=status)
+    if query_type:
+        queries = queries.filter(query_type=query_type)
+
+    query_params = request.GET.copy()
+    query_params.pop("page", None)
+
+    contexts = {
+        "active_tab": "queries",
+        "page_items": paginate_items(request, queries),
+        "status_choices": CustomerQuery.STATUS_CHOICES,
+        "query_type_choices": CustomerQuery.QUERY_TYPE_CHOICES,
+        "query_string": query_params.urlencode(),
+    }
+    return render(request, "manager/queries.html", contexts)
+
+
+@user_passes_test(AdminManagerRole, login_url="/manager/login/")
+def manager_view_query(request, query_id):
+    query = get_object_or_404(CustomerQuery, id=query_id)
+
+    if request.method == "POST":
+        status = request.POST.get("status")
+        admin_name = request.POST.get("admin_name", "").strip()
+        admin_comment = request.POST.get("admin_comment", "").strip()
+        admin_proof = request.FILES.get("admin_proof")
+
+        if status not in dict(CustomerQuery.STATUS_CHOICES):
+            messages.error(request, "Select a valid query status.")
+            return redirect("manager_view_query", query_id=query.id)
+
+        query.status = status
+        query.admin_name = admin_name
+        query.admin_comment = admin_comment
+        if admin_proof:
+            query.admin_proof = admin_proof
+        if status in ("resolved", "closed") and not query.resolved_date:
+            query.resolved_date = timezone.now()
+        elif status not in ("resolved", "closed"):
+            query.resolved_date = None
+        query.save()
+
+        messages.success(request, "Query details updated successfully.")
+        return redirect("manager_view_query", query_id=query.id)
+
+    contexts = {
+        "active_tab": "queries",
+        "query": query,
+        "status_choices": CustomerQuery.STATUS_CHOICES,
+    }
+    return render(request, "manager/view_query.html", contexts)
+
+
+def parse_manager_datetime(value):
+    if not value:
+        return None
+    parsed = parse_datetime(value)
+    if parsed and timezone.is_naive(parsed):
+        parsed = timezone.make_aware(parsed)
+    return parsed
+
+
+@user_passes_test(AdminManagerRole, login_url="/manager/login/")
+def manager_promo_codes(request, promo_id=None):
+    promo = PromoCode.objects.filter(id=promo_id).first() if promo_id else None
+
+    if request.method == "POST":
+        code = (request.POST.get("code") or "").strip().upper()
+        razorpay_offer_id = (request.POST.get("razorpay_offer_id") or "").strip()
+        discount_type = request.POST.get("discount_type") or PromoCode.DISCOUNT_FLAT
+        discount_value = Decimal(request.POST.get("discount_value") or "0")
+        max_discount_amount = request.POST.get("max_discount_amount") or None
+        minimum_order_amount = Decimal(request.POST.get("minimum_order_amount") or "0")
+        max_uses_total = request.POST.get("max_uses_total") or None
+        max_uses_per_user = request.POST.get("max_uses_per_user") or 1
+        is_active = request.POST.get("is_active") == "on"
+
+        if not promo:
+            promo = PromoCode()
+
+        promo.code = code
+        promo.razorpay_offer_id = razorpay_offer_id
+        promo.discount_type = discount_type
+        promo.discount_value = discount_value
+        promo.max_discount_amount = Decimal(max_discount_amount) if max_discount_amount else None
+        promo.minimum_order_amount = minimum_order_amount
+        promo.max_uses_total = int(max_uses_total) if max_uses_total else None
+        promo.max_uses_per_user = int(max_uses_per_user)
+        promo.valid_from = parse_manager_datetime(request.POST.get("valid_from"))
+        promo.valid_until = parse_manager_datetime(request.POST.get("valid_until"))
+        promo.is_active = is_active
+        promo.save()
+        messages.success(request, "Promo code saved successfully.")
+        return redirect("manager_promo_codes")
+
+    contexts = {
+        "active_tab": "promo_codes",
+        "promo": promo,
+        "promo_codes": PromoCode.objects.all(),
+        "discount_type_choices": PromoCode.DISCOUNT_TYPE_CHOICES,
+    }
+    return render(request, "manager/promo_codes.html", contexts)
+
+
+@user_passes_test(AdminManagerRole, login_url="/manager/login/")
+def manager_promo_usage(request):
+    usages = PromoCodeUsage.objects.select_related("promo_code", "profile").all()
+    usages = apply_date_filters(usages, request, "used_at")
+    code = (request.GET.get("code") or "").strip()
+    payment_id = (request.GET.get("payment_id") or "").strip()
+    order_id = (request.GET.get("order_id") or "").strip()
+
+    if code:
+        usages = usages.filter(promo_code__code__icontains=code)
+    if payment_id:
+        usages = usages.filter(razorpay_payment_id__icontains=payment_id)
+    if order_id:
+        usages = usages.filter(razorpay_order_id__icontains=order_id)
+
+    contexts = {
+        "active_tab": "promo_usage",
+        "page_items": paginate_items(request, usages),
+    }
+    return render(request, "manager/promo_usage.html", contexts)
+```
+
+==================================================================
+pixyproject/urls.py - admin dashboard routes
+==================================================================
+
+FILE: pixyproject\urls.py
+
+```
+    path("query-status/", views.query_status, name="query_status"),
+    path("manager/login/", views.manager_login, name="manager_login"),
+    path("manager/logout/", views.manager_logout, name="manager_logout"),
+    path("manager/", views.manager_dashboard, name="manager_dashboard"),
+    path("manager/completed/", views.manager_completed, name="manager_completed"),
+    path("manager/pending/", views.manager_pending, name="manager_pending"),
+    path("manager/queries/", views.manager_queries, name="manager_queries"),
+    path("manager/queries/<int:query_id>/", views.manager_view_query, name="manager_view_query"),
+    path("manager/promo-codes/", views.manager_promo_codes, name="manager_promo_codes"),
+    path("manager/promo-codes/<int:promo_id>/edit/", views.manager_promo_codes, name="manager_promo_code_edit"),
+    path("manager/promo-usage/", views.manager_promo_usage, name="manager_promo_usage"),
+```
+
+==================================================================
+cardapp/templates/manager/base_admin.html
+==================================================================
+
+FILE: cardapp\templates\manager\base_admin.html
+
+```
+<!DOCTYPE html>
+{% load static %}
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NexoKard Manager</title>
+    <link rel="icon" type="image/png" href="{% static 'images/NC_Logo_black.png' %}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            background: #f4f6f9;
+            color: #1f2933;
+            font-family: Arial, Helvetica, sans-serif;
+        }
+
+        .Admin-Header {
+            align-items: center;
+            background: #111827;
+            display: flex;
+            gap: 18px;
+            justify-content: space-between;
+            padding: 14px 24px;
+        }
+
+        .Admin-Brand {
+            align-items: center;
+            color: #fff;
+            display: flex;
+            font-size: 18px;
+            font-weight: 700;
+            gap: 10px;
+            text-decoration: none;
+            white-space: nowrap;
+        }
+
+        .Admin-Brand img {
+            height: 34px;
+            width: auto;
+        }
+
+        .Admin-Nav {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            justify-content: flex-end;
+        }
+
+        .Admin-Nav a {
+            border: 1px solid #334155;
+            color: #e5e7eb;
+            font-size: 14px;
+            padding: 9px 12px;
+            text-decoration: none;
+        }
+
+        .Admin-Nav a.active,
+        .Admin-Nav a:hover {
+            background: #e30613;
+            border-color: #e30613;
+            color: #fff;
+        }
+
+        .Breadcrumb {
+            background: #fff;
+            border-bottom: 1px solid #dfe4ea;
+            padding: 14px 24px;
+        }
+
+        .Breadcrumb ul {
+            display: flex;
+            gap: 8px;
+            list-style: none;
+            margin: 0;
+            padding: 0;
+        }
+
+        .Breadcrumb a {
+            color: #e30613;
+            font-weight: 700;
+            text-decoration: none;
+        }
+
+        .Master-Content-Box {
+            margin: 22px auto;
+            max-width: 1400px;
+            padding: 0 18px 30px;
+        }
+
+        .Search-Filter-Container {
+            background: #fff;
+            border: 1px solid #dfe4ea;
+            margin-bottom: 16px;
+            padding: 14px;
+        }
+
+        .Search-Filter-Container form {
+            display: grid;
+            gap: 10px;
+            grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+        }
+
+        input,
+        select,
+        textarea {
+            border: 1px solid #cfd6df;
+            font: inherit;
+            padding: 10px;
+            width: 100%;
+        }
+
+        textarea {
+            min-height: 80px;
+            resize: vertical;
+        }
+
+        .Admin-Btn {
+            align-items: center;
+            background: #e30613;
+            border: 0;
+            color: #fff;
+            cursor: pointer;
+            display: inline-flex;
+            font-weight: 700;
+            gap: 6px;
+            justify-content: center;
+            min-height: 40px;
+            padding: 10px 14px;
+            text-decoration: none;
+        }
+
+        td .Admin-Btn {
+            font-size: 13px;
+            min-height: 30px;
+            padding: 6px 10px;
+        }
+
+        .Admin-Btn.secondary {
+            background: #111827;
+        }
+
+        .Stats-Grid {
+            display: grid;
+            gap: 14px;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            margin-bottom: 18px;
+        }
+
+        .Stat-Box {
+            background: #fff;
+            border-left: 4px solid #e30613;
+            box-shadow: 0 8px 18px rgba(15, 23, 42, 0.06);
+            padding: 18px;
+        }
+
+        .Stat-Box span {
+            color: #64748b;
+            display: block;
+            font-size: 13px;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+        }
+
+        .Stat-Box strong {
+            color: #111827;
+            display: block;
+            font-size: 28px;
+        }
+
+        .Panel {
+            background: #fff;
+            border: 1px solid #dfe4ea;
+            margin-bottom: 18px;
+            overflow-x: auto;
+            padding: 16px;
+        }
+
+        .Panel h2 {
+            font-size: 20px;
+            margin: 0 0 14px;
+        }
+
+        table {
+            border-collapse: collapse;
+            min-width: 900px;
+            width: 100%;
+        }
+
+        th,
+        td {
+            border: 1px solid #e5e7eb;
+            font-size: 14px;
+            padding: 10px;
+            text-align: left;
+            vertical-align: top;
+        }
+
+        th {
+            background: #111827;
+            color: #fff;
+            white-space: nowrap;
+        }
+
+        .Status {
+            display: inline-block;
+            font-size: 12px;
+            font-weight: 700;
+            padding: 5px 8px;
+            text-transform: uppercase;
+        }
+
+        .Status.success,
+        .Status.resolved {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .Status.pending {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .Status.failed,
+        .Status.closed {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .Status.in_process {
+            background: #dbeafe;
+            color: #1e40af;
+        }
+
+        .Pagination {
+            display: flex;
+            gap: 8px;
+            justify-content: center;
+            margin-top: 16px;
+        }
+
+        .Pagination a,
+        .Pagination span {
+            background: #fff;
+            border: 1px solid #cfd6df;
+            color: #111827;
+            padding: 8px 11px;
+            text-decoration: none;
+        }
+
+        .Admin-Messages {
+            margin-bottom: 14px;
+        }
+
+        .Admin-Messages div {
+            background: #dcfce7;
+            border: 1px solid #86efac;
+            color: #166534;
+            padding: 10px;
+        }
+
+        @media (max-width: 800px) {
+            .Admin-Header {
+                align-items: flex-start;
+                flex-direction: column;
+            }
+
+            .Admin-Nav {
+                justify-content: flex-start;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <header class="Admin-Header">
+        <a class="Admin-Brand" href="{% url 'manager_dashboard' %}">
+            <img src="{% static 'images/NC_Logo_White.png' %}" alt="NexoKard">
+            NexoKard
+        </a>
+        <nav class="Admin-Nav">
+            <a class="{% if active_tab == 'dashboard' %}active{% endif %}"
+                href="{% url 'manager_dashboard' %}">Dashboard</a>
+            <a class="{% if active_tab == 'completed' %}active{% endif %}"
+                href="{% url 'manager_completed' %}">Completed</a>
+            <a class="{% if active_tab == 'pending' %}active{% endif %}" href="{% url 'manager_pending' %}">Pending</a>
+            <a class="{% if active_tab == 'queries' %}active{% endif %}" href="{% url 'manager_queries' %}">Queries</a>
+            <a class="{% if active_tab == 'promo_codes' %}active{% endif %}"
+                href="{% url 'manager_promo_codes' %}">Promo Code Add</a>
+            <a class="{% if active_tab == 'promo_usage' %}active{% endif %}"
+                href="{% url 'manager_promo_usage' %}">Promo Code Usage</a>
+            <a href="/pixelmaster/" target="_blank">Django Admin</a>
+            <a href="{% url 'manager_logout' %}">Logout</a>
+        </nav>
+    </header>
+
+    <div class="Breadcrumb">
+        <ul>
+            <li><a href="{% url 'manager_dashboard' %}">Dashboard</a></li>
+            <li>/</li>
+            <li>{% block breadcrumb %}Dashboard{% endblock %}</li>
+        </ul>
+    </div>
+
+    <main class="Master-Content-Box">
+        {% if messages %}
+        <div class="Admin-Messages">
+            {% for message in messages %}
+            <div>{{ message }}</div>
+            {% endfor %}
+        </div>
+        {% endif %}
+        {% block content %}{% endblock %}
+    </main>
+    <script>
+        document.addEventListener("DOMContentLoaded", function () {
+            document.querySelectorAll(".Admin-Messages").forEach(function (messageBox) {
+                setTimeout(function () {
+                    messageBox.style.display = "none";
+                }, 2000);
+            });
+        });
+    </script>
+</body>
+
+</html>
+```
+
+==================================================================
+cardapp/templates/manager/login.html
+==================================================================
+
+FILE: cardapp\templates\manager\login.html
+
+```
+<!DOCTYPE html>
+{% load static %}
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NexoKard Manager Login</title>
+    <link rel="icon" type="image/png" href="{% static 'images/NC_Logo_black.png' %}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            align-items: center;
+            background: #f4f6f9;
+            display: flex;
+            font-family: Arial, Helvetica, sans-serif;
+            justify-content: center;
+            margin: 0;
+            min-height: 100vh;
+            padding: 18px;
+        }
+        .Login-Box {
+            background: #ffffff;
+            border: 1px solid #dfe4ea;
+            box-shadow: 0 14px 40px rgba(15, 23, 42, 0.12);
+            max-width: 420px;
+            padding: 30px;
+            width: 100%;
+        }
+        .Login-Logo {
+            background: #111827;
+            margin: -30px -30px 26px;
+            padding: 22px;
+            text-align: center;
+        }
+        .Login-Logo img {
+            max-height: 52px;
+            max-width: 210px;
+        }
+        h1 {
+            color: #111827;
+            font-size: 26px;
+            margin: 0 0 6px;
+            text-align: center;
+        }
+        p {
+            color: #64748b;
+            margin: 0 0 24px;
+            text-align: center;
+        }
+        label {
+            color: #334155;
+            display: block;
+            font-size: 14px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+        input {
+            border: 1px solid #cfd6df;
+            font: inherit;
+            margin-bottom: 16px;
+            padding: 12px;
+            width: 100%;
+        }
+        button {
+            background: #e30613;
+            border: 0;
+            color: #ffffff;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 700;
+            min-height: 44px;
+            width: 100%;
+        }
+        .Login-Message {
+            background: #fee2e2;
+            border: 1px solid #fecaca;
+            color: #991b1b;
+            margin-bottom: 16px;
+            padding: 10px;
+            text-align: center;
+        }
+        .Back-Link {
+            display: block;
+            color: #111827;
+            font-size: 14px;
+            margin-top: 18px;
+            text-align: center;
+            text-decoration: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="Login-Box">
+        <div class="Login-Logo">
+            <img src="{% static 'images/NC_Logo_White.png' %}" alt="NexoKard">
+        </div>
+        <h1>Manager Login</h1>
+        <p>Sign in to access the NexoKard manager panel.</p>
+
+        {% if messages %}
+            {% for message in messages %}
+                <div class="Login-Message">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+
+        <form method="post">
+            {% csrf_token %}
+            <input type="hidden" name="next" value="{{ next }}">
+            <label for="username">Username</label>
+            <input id="username" type="text" name="username" placeholder="Enter username" required autofocus>
+
+            <label for="password">Password</label>
+            <input id="password" type="password" name="password" placeholder="Enter password" required>
+
+            <button type="submit"><i class="fa fa-lock"></i> Login</button>
+        </form>
+        <a class="Back-Link" href="/">Back to website</a>
+    </div>
+</body>
+</html>
+```
+
+==================================================================
+cardapp/templates/manager/dashboard.html
+==================================================================
+
+FILE: cardapp\templates\manager\dashboard.html
+
+```
+{% extends "manager/base_admin.html" %}
+
+{% block breadcrumb %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="Stats-Grid">
+    <div class="Stat-Box">
+        <span>Total Profiles</span>
+        <strong>{{ total_profiles }}</strong>
+    </div>
+    <div class="Stat-Box">
+        <span>Completed</span>
+        <strong>{{ completed_profiles }}</strong>
+    </div>
+    <div class="Stat-Box">
+        <span>Pending</span>
+        <strong>{{ pending_profiles }}</strong>
+    </div>
+    <div class="Stat-Box">
+        <span>Total Queries</span>
+        <strong>{{ total_queries }}</strong>
+    </div>
+    <div class="Stat-Box">
+        <span>Total Collected Amount</span>
+        <strong>Rs {{ completed_amount }}</strong>
+    </div>
+    <div class="Stat-Box">
+        <span>Amount Balance In Account</span>
+        <strong>Rs {{ pending_amount }}</strong>
+    </div>
+    <div class="Stat-Box">
+        <span>Promo Usage Amount</span>
+        <strong>Rs {{ promo_usage_amount }}</strong>
+    </div>
+</div>
+
+<div class="Panel">
+    <h2>Recent Completed Profiles</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>S.No.</th>
+                <th>Name</th>
+                <th>Mobile No.</th>
+                <th>Payment ID</th>
+                <th>Payment Status</th>
+                <th>Date</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for profile in recent_completed %}
+            <tr>
+                <td>{{ forloop.counter }}</td>
+                <td>{{ profile.full_name }}</td>
+                <td>{{ profile.phone }}</td>
+                <td>{{ profile.razorpay_payment_id|default:"-" }}</td>
+                <td><span class="Status success">Successful</span></td>
+                <td>{{ profile.created_at|date:"d M Y, h:i A" }}</td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="6">No completed profiles found.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<div class="Panel">
+    <h2>Recent Queries</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Query ID</th>
+                <th>Contact No.</th>
+                <th>Name</th>
+                <th>Query Type</th>
+                <th>Query Date</th>
+                <th>Status</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for query in recent_queries %}
+            <tr>
+                <td>{{ query.query_id }}</td>
+                <td>{{ query.contact_no }}</td>
+                <td>{{ query.name|default:"-" }}</td>
+                <td>{{ query.get_query_type_display }}</td>
+                <td>{{ query.query_date|date:"d M Y, h:i A" }}</td>
+                <td><span class="Status {{ query.status }}">{{ query.get_status_display }}</span></td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="6">No queries found.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+```
+
+==================================================================
+cardapp/templates/manager/profiles.html
+==================================================================
+
+FILE: cardapp\templates\manager\profiles.html
+
+```
+{% extends "manager/base_admin.html" %}
+
+{% block breadcrumb %}{{ title }}{% endblock %}
+
+{% block content %}
+<div class="Search-Filter-Container">
+    <form action="" method="get">
+        <input placeholder="Start Date" type="text" name="start_date" value="{{ request.GET.start_date }}" onfocus="this.type='date'" onblur="if(!this.value){this.type='text'}">
+        <input placeholder="End Date" type="text" name="end_date" value="{{ request.GET.end_date }}" onfocus="this.type='date'" onblur="if(!this.value){this.type='text'}">
+        <input type="number" name="contact_no" value="{{ request.GET.contact_no }}" placeholder="Contact Number">
+        <input type="text" name="public_username" value="{{ request.GET.public_username }}" placeholder="Card URL">
+        <input type="text" name="payment_id" value="{{ request.GET.payment_id }}" placeholder="Payment ID">
+        <button class="Admin-Btn" type="submit"><i class="fa fa-search"></i> Search</button>
+    </form>
+</div>
+
+<div class="Panel">
+    <h2>{{ title }} Profiles</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>S.No.</th>
+                <th>Transaction ID</th>
+                <th>Order ID</th>
+                <th>Payment ID</th>
+                <th>Cust. Name</th>
+                <th>Mobile No.</th>
+                <th>Amount Paid</th>
+                <th>Discount Applied</th>
+                <th>Final Paid Amount</th>
+                <th>Payment Mode</th>
+                <th>Payment Status</th>
+                <th>Payment Date & Time</th>
+                <th>Invoice / Receipt</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for profile in page_items %}
+            <tr>
+                <td>{{ forloop.counter }}</td>
+                <td>TXN{{ profile.id }}</td>
+                <td>-</td>
+                <td>{{ profile.razorpay_payment_id|default:"-" }}</td>
+                <td>{{ profile.full_name }}</td>
+                <td>{{ profile.phone }}</td>
+                <td>Rs {{ REGISTRATION_FEE|default:"1000" }}</td>
+                <td>
+                    {% if profile.promo_usages.first %}
+                        {{ profile.promo_usages.first.promo_code.code }}
+                    {% else %}
+                        -
+                    {% endif %}
+                </td>
+                <td>
+                    {% if profile.promo_usages.first %}
+                        Rs {{ profile.promo_usages.first.amount }}
+                    {% else %}
+                        Rs {{ REGISTRATION_FEE|default:"1000" }}
+                    {% endif %}
+                </td>
+                <td>Razorpay</td>
+                <td>
+                    {% if profile.payment_status %}
+                        <span class="Status success">Successful</span>
+                    {% else %}
+                        <span class="Status pending">Pending</span>
+                    {% endif %}
+                </td>
+                <td>{{ profile.created_at|date:"d M Y, h:i A" }}</td>
+                <td>
+                    {% if profile.public_username %}
+                        <a class="Admin-Btn secondary" href="{% url 'view_business_card' profile.public_username %}" target="_blank">View</a>
+                    {% else %}
+                        -
+                    {% endif %}
+                </td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="13">No records found.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div class="Pagination">
+        {% if page_items.has_previous %}
+            <a href="?page={{ page_items.previous_page_number }}&start_date={{ request.GET.start_date }}&end_date={{ request.GET.end_date }}&contact_no={{ request.GET.contact_no }}&public_username={{ request.GET.public_username }}&payment_id={{ request.GET.payment_id }}">Prev</a>
+        {% endif %}
+        <span>Page {{ page_items.number }} of {{ page_items.paginator.num_pages }}</span>
+        {% if page_items.has_next %}
+            <a href="?page={{ page_items.next_page_number }}&start_date={{ request.GET.start_date }}&end_date={{ request.GET.end_date }}&contact_no={{ request.GET.contact_no }}&public_username={{ request.GET.public_username }}&payment_id={{ request.GET.payment_id }}">Next</a>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+```
+
+==================================================================
+cardapp/templates/manager/queries.html
+==================================================================
+
+FILE: cardapp\templates\manager\queries.html
+
+```
+{% extends "manager/base_admin.html" %}
+
+{% block breadcrumb %}Queries{% endblock %}
+
+{% block content %}
+<div class="Search-Filter-Container">
+    <form action="" method="get">
+        <input placeholder="Start Date" type="text" name="start_date" value="{{ request.GET.start_date }}" onfocus="this.type='date'" onblur="if(!this.value){this.type='text'}">
+        <input placeholder="End Date" type="text" name="end_date" value="{{ request.GET.end_date }}" onfocus="this.type='date'" onblur="if(!this.value){this.type='text'}">
+        <input type="number" name="contact_no" value="{{ request.GET.contact_no }}" placeholder="Contact Number">
+        <select name="query_type">
+            <option value="">All Query Types</option>
+            {% for value, label in query_type_choices %}
+                <option value="{{ value }}" {% if request.GET.query_type == value %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+        <select name="status">
+            <option value="">All Status</option>
+            {% for value, label in status_choices %}
+                <option value="{{ value }}" {% if request.GET.status == value %}selected{% endif %}>{{ label }}</option>
+            {% endfor %}
+        </select>
+        <button class="Admin-Btn" type="submit"><i class="fa fa-search"></i> Search</button>
+    </form>
+</div>
+
+<div class="Panel">
+    <h2>Customer Queries</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>S.No.</th>
+                <th>Query ID</th>
+                <th>Date</th>
+                <th>Contact No.</th>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Message</th>
+                <th>Proof</th>
+                <th>Status</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for query in page_items %}
+            <tr>
+                <td>{{ forloop.counter }}</td>
+                <td><a href="{% url 'manager_view_query' query.id %}">{{ query.query_id }}</a></td>
+                <td>{{ query.query_date|date:"d M Y, h:i A" }}</td>
+                <td>{{ query.contact_no }}</td>
+                <td>{{ query.name|default:"-" }}</td>
+                <td>{{ query.get_query_type_display }}</td>
+                <td>{{ query.message|default:"-"|truncatechars:70 }}</td>
+                <td>
+                    {% if query.proof_of_evidence %}
+                        <a class="Admin-Btn secondary" href="{{ query.proof_of_evidence.url }}" target="_blank">Open</a>
+                    {% else %}
+                        -
+                    {% endif %}
+                </td>
+                <td><span class="Status {{ query.status }}">{{ query.get_status_display }}</span></td>
+                <td><a class="Admin-Btn" href="{% url 'manager_view_query' query.id %}">View</a></td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="10">No queries found.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div class="Pagination">
+        {% if page_items.has_previous %}
+            <a href="?{% if query_string %}{{ query_string }}&{% endif %}page={{ page_items.previous_page_number }}">Prev</a>
+        {% endif %}
+        <span>Page {{ page_items.number }} of {{ page_items.paginator.num_pages }}</span>
+        {% if page_items.has_next %}
+            <a href="?{% if query_string %}{{ query_string }}&{% endif %}page={{ page_items.next_page_number }}">Next</a>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+```
+
+==================================================================
+cardapp/templates/manager/view_query.html
+==================================================================
+
+FILE: cardapp\templates\manager\view_query.html
+
+```
+{% extends "manager/base_admin.html" %}
+
+{% block breadcrumb %}View Query{% endblock %}
+
+{% block content %}
+<div class="Panel query-detail-panel">
+    <div class="query-detail-header">
+        <div>
+            <h2>{{ query.query_id }}</h2>
+            <p>{{ query.get_query_type_display }} raised on {{ query.query_date|date:"d M Y, h:i A" }}</p>
+        </div>
+        <span class="Status {{ query.status }}">{{ query.get_status_display }}</span>
+    </div>
+
+    <div class="query-detail-grid">
+        <div>
+            <label>Customer Name</label>
+            <strong>{{ query.name|default:"-" }}</strong>
+        </div>
+        <div>
+            <label>Contact Number</label>
+            <strong>{{ query.contact_no }}</strong>
+        </div>
+        <div>
+            <label>Last Updated</label>
+            <strong>{{ query.updated_at|date:"d M Y, h:i A" }}</strong>
+        </div>
+        <div>
+            <label>Resolved Date</label>
+            <strong>{{ query.resolved_date|date:"d M Y, h:i A"|default:"-" }}</strong>
+        </div>
+    </div>
+
+    <div class="query-block">
+        <label>Customer Message</label>
+        <p>{{ query.message|default:"-" }}</p>
+    </div>
+
+    <div class="query-detail-grid two-col">
+        <div>
+            <label>Customer Proof</label>
+            {% if query.proof_of_evidence %}
+                <a class="Admin-Btn secondary" href="{{ query.proof_of_evidence.url }}" target="_blank">Open Evidence</a>
+            {% else %}
+                <strong>-</strong>
+            {% endif %}
+        </div>
+        <div>
+            <label>Resolution Proof</label>
+            {% if query.admin_proof %}
+                <a class="Admin-Btn secondary" href="{{ query.admin_proof.url }}" target="_blank">Open Resolution Proof</a>
+            {% else %}
+                <strong>-</strong>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<div class="Panel">
+    <h2>Admin Resolution</h2>
+    <form method="post" enctype="multipart/form-data" class="query-resolution-form">
+        {% csrf_token %}
+        <div class="query-form-grid">
+            <div>
+                <label>Resolver Name</label>
+                <input type="text" name="admin_name" value="{{ query.admin_name|default:'' }}" placeholder="Name of resolver">
+            </div>
+            <div>
+                <label>Status</label>
+                <select name="status" required>
+                    {% for value, label in status_choices %}
+                        <option value="{{ value }}" {% if query.status == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+        </div>
+
+        <label>Admin Comment</label>
+        <textarea name="admin_comment" maxlength="500" placeholder="Write the update visible to the customer">{{ query.admin_comment|default:'' }}</textarea>
+
+        <label>Proof of Resolution</label>
+        <input type="file" name="admin_proof">
+
+        <div class="query-actions">
+            <a class="Admin-Btn secondary" href="{% url 'manager_queries' %}">Back</a>
+            <button class="Admin-Btn" type="submit">Save Query Update</button>
+        </div>
+    </form>
+</div>
+
+<style>
+    .query-detail-header {
+        align-items: flex-start;
+        display: flex;
+        gap: 16px;
+        justify-content: space-between;
+    }
+    .query-detail-header p {
+        color: #64748b;
+        margin: 4px 0 0;
+    }
+    .query-detail-grid {
+        display: grid;
+        gap: 14px;
+        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+        margin-top: 18px;
+    }
+    .query-detail-grid label,
+    .query-block label,
+    .query-resolution-form label {
+        color: #64748b;
+        display: block;
+        font-size: 12px;
+        font-weight: 700;
+        margin-bottom: 6px;
+        text-transform: uppercase;
+    }
+    .query-detail-grid > div,
+    .query-block {
+        background: #f8fafc;
+        border: 1px solid #e5e7eb;
+        padding: 14px;
+    }
+    .query-block {
+        margin-top: 14px;
+    }
+    .query-block p {
+        margin: 0;
+        white-space: pre-wrap;
+    }
+    .query-form-grid {
+        display: grid;
+        gap: 14px;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+    .query-actions {
+        display: flex;
+        gap: 10px;
+        justify-content: flex-end;
+        margin-top: 14px;
+    }
+</style>
+{% endblock %}
+```
+
+==================================================================
+cardapp/templates/manager/promo_codes.html
+==================================================================
+
+FILE: cardapp\templates\manager\promo_codes.html
+
+```
+{% extends "manager/base_admin.html" %}
+
+{% block breadcrumb %}Promo Code Add{% endblock %}
+
+{% block content %}
+<div class="Panel">
+    <h2>{% if promo %}Edit Promo Code{% else %}Add Promo Code{% endif %}</h2>
+    <form method="post">
+        {% csrf_token %}
+        <div class="Search-Filter-Container">
+            <div style="display:grid; gap:10px; grid-template-columns:repeat(auto-fit, minmax(190px, 1fr));">
+                <input type="text" name="code" value="{{ promo.code|default:'' }}" placeholder="Code" required>
+                <div>
+                    <input type="text" name="razorpay_offer_id" value="{{ promo.razorpay_offer_id|default:'' }}" placeholder="Razorpay Offer ID" required>
+                    <small style="display:block; margin-top:5px; color:#666;">Create/use an offer whose Applicable On payment method includes UPI. Razorpay offers cannot be edited after creation.</small>
+                </div>
+                <select name="discount_type" required>
+                    {% for value, label in discount_type_choices %}
+                        <option value="{{ value }}" {% if promo.discount_type == value %}selected{% endif %}>{{ label }}</option>
+                    {% endfor %}
+                </select>
+                <input type="number" step="0.01" name="discount_value" value="{{ promo.discount_value|default:'' }}" placeholder="Discount Value" required>
+                <input type="number" step="0.01" name="max_discount_amount" value="{{ promo.max_discount_amount|default:'' }}" placeholder="Max Discount Amount">
+                <input type="number" step="0.01" name="minimum_order_amount" value="{{ promo.minimum_order_amount|default:'0' }}" placeholder="Minimum Order Amount">
+                <input type="number" name="max_uses_total" value="{{ promo.max_uses_total|default:'' }}" placeholder="Max Uses Total">
+                <input type="number" name="max_uses_per_user" value="{{ promo.max_uses_per_user|default:'1' }}" placeholder="Max Uses Per User">
+                <input type="datetime-local" name="valid_from" value="{{ promo.valid_from|date:'Y-m-d\\TH:i' }}" placeholder="Valid From">
+                <input type="datetime-local" name="valid_until" value="{{ promo.valid_until|date:'Y-m-d\\TH:i' }}" placeholder="Valid Until">
+                <label style="align-items:center; display:flex; gap:8px;">
+                    <input type="checkbox" name="is_active" style="width:auto;" {% if promo.is_active or not promo %}checked{% endif %}>
+                    Active
+                </label>
+                <button class="Admin-Btn" type="submit"><i class="fa fa-save"></i> Save Promo Code</button>
+            </div>
+        </div>
+    </form>
+</div>
+
+<div class="Panel">
+    <h2>Promo Codes</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>Code</th>
+                <th>Razorpay Offer ID</th>
+                <th>Discount Type</th>
+                <th>Discount Value</th>
+                <th>Max Per User</th>
+                <th>Status</th>
+                <th>Valid From</th>
+                <th>Valid Until</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for code in promo_codes %}
+            <tr>
+                <td>{{ code.code }}</td>
+                <td>{{ code.razorpay_offer_id }}</td>
+                <td>{{ code.get_discount_type_display }}</td>
+                <td>{{ code.discount_value }}</td>
+                <td>{{ code.max_uses_per_user }}</td>
+                <td>
+                    {% if code.is_active %}
+                        <span class="Status success">Active</span>
+                    {% else %}
+                        <span class="Status closed">Inactive</span>
+                    {% endif %}
+                </td>
+                <td>{{ code.valid_from|date:"d M Y, h:i A"|default:"-" }}</td>
+                <td>{{ code.valid_until|date:"d M Y, h:i A"|default:"-" }}</td>
+                <td><a class="Admin-Btn secondary" href="{% url 'manager_promo_code_edit' code.id %}">Edit</a></td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="9">No promo codes found.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endblock %}
+```
+
+==================================================================
+cardapp/templates/manager/promo_usage.html
+==================================================================
+
+FILE: cardapp\templates\manager\promo_usage.html
+
+```
+{% extends "manager/base_admin.html" %}
+
+{% block breadcrumb %}Promo Code Usage{% endblock %}
+
+{% block content %}
+<div class="Search-Filter-Container">
+    <form action="" method="get">
+        <input placeholder="Start Date" type="text" name="start_date" value="{{ request.GET.start_date }}" onfocus="this.type='date'" onblur="if(!this.value){this.type='text'}">
+        <input placeholder="End Date" type="text" name="end_date" value="{{ request.GET.end_date }}" onfocus="this.type='date'" onblur="if(!this.value){this.type='text'}">
+        <input type="text" name="code" value="{{ request.GET.code }}" placeholder="Promo Code">
+        <input type="text" name="order_id" value="{{ request.GET.order_id }}" placeholder="Order ID">
+        <input type="text" name="payment_id" value="{{ request.GET.payment_id }}" placeholder="Payment ID">
+        <button class="Admin-Btn" type="submit"><i class="fa fa-search"></i> Search</button>
+    </form>
+</div>
+
+<div class="Panel">
+    <h2>Promo Code Usage</h2>
+    <table>
+        <thead>
+            <tr>
+                <th>S.No.</th>
+                <th>Code</th>
+                <th>Customer Name</th>
+                <th>Contact No.</th>
+                <th>Razorpay Offer ID</th>
+                <th>Order ID</th>
+                <th>Payment ID</th>
+                <th>Amount</th>
+                <th>Used At</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for usage in page_items %}
+            <tr>
+                <td>{{ forloop.counter }}</td>
+                <td>{{ usage.promo_code.code }}</td>
+                <td>{{ usage.profile.full_name }}</td>
+                <td>{{ usage.profile.phone }}</td>
+                <td>{{ usage.razorpay_offer_id }}</td>
+                <td>{{ usage.razorpay_order_id }}</td>
+                <td>{{ usage.razorpay_payment_id }}</td>
+                <td>Rs {{ usage.amount }}</td>
+                <td>{{ usage.used_at|date:"d M Y, h:i A" }}</td>
+            </tr>
+            {% empty %}
+            <tr><td colspan="9">No promo usage found.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <div class="Pagination">
+        {% if page_items.has_previous %}
+            <a href="?page={{ page_items.previous_page_number }}&start_date={{ request.GET.start_date }}&end_date={{ request.GET.end_date }}&code={{ request.GET.code }}&order_id={{ request.GET.order_id }}&payment_id={{ request.GET.payment_id }}">Prev</a>
+        {% endif %}
+        <span>Page {{ page_items.number }} of {{ page_items.paginator.num_pages }}</span>
+        {% if page_items.has_next %}
+            <a href="?page={{ page_items.next_page_number }}&start_date={{ request.GET.start_date }}&end_date={{ request.GET.end_date }}&code={{ request.GET.code }}&order_id={{ request.GET.order_id }}&payment_id={{ request.GET.payment_id }}">Next</a>
+        {% endif %}
+    </div>
+</div>
+{% endblock %}
+```
+
+==================================================================
+VERIFY AFTER COPYING
+==================================================================
+
+Run these commands after copying:
+python manage.py makemigrations
+python manage.py migrate
+python manage.py check
+
+Manual checks:
+1. Login with staff user at /manager/login/.
+2. Open /manager/ dashboard.
+3. Open Completed and Pending tabs.
+4. Open Queries tab.
+5. Click View on a query.
+6. Update status/comment/admin proof.
+7. Open Promo Code Add and save/edit promo.
+8. Open Promo Code Usage.
+
+If you get NoReverseMatch:
+Check that template {% url %} names match pixyproject/urls.py names.
+Common mismatch from task001.txt:
+- view_query vs manager_view_query
+
+If proof file does not show:
+Check model field/template field/input field names.
+Common mismatch from task001.txt:
+- proof vs proof_of_evidence
