@@ -1,0 +1,680 @@
+FIREBASE + FLUTTER/DART ADD TO CONTACT GUIDE
+============================================
+
+Date prepared: 2026-05-19
+Project source context: D:\ABCD\Workflow ppt
+
+Purpose:
+This file explains Add to Contact when your mobile app is built with Flutter/Dart
+and your data is coming from Firebase/Firestore.
+
+Goal:
+User opens business card in Flutter app, taps Add to Contact, and the app saves
+the card details into the phone contacts without the user manually typing name,
+company, mobile number, email, address, website, etc.
+
+
+================================================
+1. BEST FLOW WHEN USING FIREBASE
+================================================
+
+Recommended flow:
+
+1. Business card data is stored in Firebase Firestore.
+2. Flutter app opens the card using public_username.
+3. Flutter app fetches card document from Firestore.
+4. User taps Add to Contact.
+5. App asks Contacts permission.
+6. App creates contact using flutter_contacts package.
+7. Phone contact is saved with all details.
+
+This is different from Django website .vcf flow.
+
+Django website:
+    Click -> .vcf -> phone opens Save Contact screen -> user taps Save
+
+Flutter Android app:
+    Click -> ask permission -> save directly into phone contacts
+
+
+================================================
+2. FIRESTORE DATA STRUCTURE
+================================================
+
+Recommended collection:
+
+```
+business_cards
+```
+
+Recommended document id:
+
+```
+public_username
+```
+
+Example:
+
+```
+business_cards
+  maheshm
+    full_name: "Mahesh Motkar"
+    company: "Pixelstat esolutions development private"
+    title: "Founder Director"
+    phone: "9441077173"
+    phone2: "9110534006"
+    company_phone1: "8712828575"
+    company_phone2: "9550799993"
+    email: "mahesh.motkar@pixelstat.com"
+    company_email: "Info@pixelstat.com"
+    website: "https://pixelstat.com"
+    address: "Plot No 40, Greenpark Avenue..."
+    intro: "PIXELSTAT is a Design and Development..."
+    public_username: "maheshm"
+    updated_at: serverTimestamp()
+```
+
+Why document id should be public_username:
+- Easy fetch:
+  business_cards/{public_username}
+- Same as your Django route:
+  /bc/<public_username>/
+- No need to query/filter for each card.
+
+
+================================================
+3. FLUTTER PACKAGES
+================================================
+
+In pubspec.yaml:
+
+```
+dependencies:
+  flutter:
+    sdk: flutter
+  firebase_core: ^latest
+  cloud_firestore: ^latest
+  flutter_contacts: ^2.0.2
+```
+
+Then run:
+
+```
+flutter pub get
+```
+
+Notes:
+- Use the latest compatible firebase_core/cloud_firestore versions from your project.
+- flutter_contacts is used to create/save phone contacts.
+
+
+================================================
+4. ANDROID PERMISSIONS
+================================================
+
+File:
+
+```
+android/app/src/main/AndroidManifest.xml
+```
+
+Add above <application>:
+
+```
+<uses-permission android:name="android.permission.READ_CONTACTS" />
+<uses-permission android:name="android.permission.WRITE_CONTACTS" />
+```
+
+Why:
+- WRITE_CONTACTS is needed to save directly.
+- READ_CONTACTS is useful if you want duplicate checking.
+- If you do not check duplicates, WRITE_CONTACTS may be enough for saving.
+
+
+================================================
+5. IOS PERMISSION
+================================================
+
+File:
+
+```
+ios/Runner/Info.plist
+```
+
+Add:
+
+```
+<key>NSContactsUsageDescription</key>
+<string>We need contacts access to save this business card to your phone.</string>
+```
+
+
+================================================
+6. DART MODEL
+================================================
+
+Create file:
+
+```
+lib/models/business_card_contact.dart
+```
+
+Code:
+
+```
+class BusinessCardContact {
+  final String fullName;
+  final String company;
+  final String title;
+  final String phone;
+  final String phone2;
+  final String companyPhone1;
+  final String companyPhone2;
+  final String email;
+  final String companyEmail;
+  final String website;
+  final String address;
+  final String intro;
+  final String publicUsername;
+
+  const BusinessCardContact({
+    required this.fullName,
+    required this.company,
+    required this.title,
+    required this.phone,
+    required this.phone2,
+    required this.companyPhone1,
+    required this.companyPhone2,
+    required this.email,
+    required this.companyEmail,
+    required this.website,
+    required this.address,
+    required this.intro,
+    required this.publicUsername,
+  });
+
+  factory BusinessCardContact.fromMap(Map<String, dynamic> data) {
+    String text(String key) => (data[key] ?? '').toString().trim();
+
+    return BusinessCardContact(
+      fullName: text('full_name'),
+      company: text('company'),
+      title: text('title'),
+      phone: text('phone'),
+      phone2: text('phone2'),
+      companyPhone1: text('company_phone1'),
+      companyPhone2: text('company_phone2'),
+      email: text('email'),
+      companyEmail: text('company_email'),
+      website: text('website'),
+      address: text('address'),
+      intro: text('intro'),
+      publicUsername: text('public_username'),
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    return {
+      'full_name': fullName,
+      'company': company,
+      'title': title,
+      'phone': phone,
+      'phone2': phone2,
+      'company_phone1': companyPhone1,
+      'company_phone2': companyPhone2,
+      'email': email,
+      'company_email': companyEmail,
+      'website': website,
+      'address': address,
+      'intro': intro,
+      'public_username': publicUsername,
+    };
+  }
+}
+```
+
+
+================================================
+7. FIRESTORE SERVICE
+================================================
+
+Create file:
+
+```
+lib/services/business_card_service.dart
+```
+
+Code:
+
+```
+import 'package:cloud_firestore/cloud_firestore.dart';
+import '../models/business_card_contact.dart';
+
+class BusinessCardService {
+  final FirebaseFirestore _db;
+
+  BusinessCardService({FirebaseFirestore? db})
+      : _db = db ?? FirebaseFirestore.instance;
+
+  Future<BusinessCardContact?> getCardByPublicUsername(
+    String publicUsername,
+  ) async {
+    final doc = await _db
+        .collection('business_cards')
+        .doc(publicUsername)
+        .get();
+
+    if (!doc.exists || doc.data() == null) {
+      return null;
+    }
+
+    return BusinessCardContact.fromMap(doc.data()!);
+  }
+}
+```
+
+
+================================================
+8. CONTACT SAVE SERVICE USING FLUTTER_CONTACTS
+================================================
+
+Create file:
+
+```
+lib/services/contact_save_service.dart
+```
+
+Code:
+
+```
+import 'package:flutter_contacts/flutter_contacts.dart';
+import '../models/business_card_contact.dart';
+
+class ContactSaveService {
+  Future<bool> saveBusinessCardToPhone(
+    BusinessCardContact card,
+  ) async {
+    final status = await FlutterContacts.permissions.request(
+      PermissionType.readWrite,
+    );
+
+    if (status != PermissionStatus.granted &&
+        status != PermissionStatus.limited) {
+      return false;
+    }
+
+    final contact = Contact(
+      name: Name(first: card.fullName),
+      phones: [
+        if (card.phone.isNotEmpty) Phone(number: card.phone),
+        if (card.phone2.isNotEmpty) Phone(number: card.phone2),
+        if (card.companyPhone1.isNotEmpty) Phone(number: card.companyPhone1),
+        if (card.companyPhone2.isNotEmpty) Phone(number: card.companyPhone2),
+      ],
+      emails: [
+        if (card.email.isNotEmpty) Email(address: card.email),
+        if (card.companyEmail.isNotEmpty) Email(address: card.companyEmail),
+      ],
+      addresses: [
+        if (card.address.isNotEmpty) Address(address: card.address),
+      ],
+      organizations: [
+        if (card.company.isNotEmpty || card.title.isNotEmpty)
+          Organization(
+            company: card.company,
+            title: card.title,
+          ),
+      ],
+      websites: [
+        if (card.website.isNotEmpty) Website(url: card.website),
+      ],
+      notes: [
+        if (card.intro.isNotEmpty) Note(note: card.intro),
+      ],
+    );
+
+    await FlutterContacts.create(contact);
+    return true;
+  }
+}
+```
+
+Important:
+Package APIs can change by version. This guide is based on flutter_contacts 2.x.
+If constructor names differ in your installed version, check pub.dev API docs and
+adjust Address/Organization/Website/Note constructors.
+
+
+================================================
+9. ADD TO CONTACT BUTTON IN FLUTTER UI
+================================================
+
+Example widget:
+
+```
+import 'package:flutter/material.dart';
+import '../services/business_card_service.dart';
+import '../services/contact_save_service.dart';
+
+class BusinessCardPage extends StatefulWidget {
+  final String publicUsername;
+
+  const BusinessCardPage({
+    super.key,
+    required this.publicUsername,
+  });
+
+  @override
+  State<BusinessCardPage> createState() => _BusinessCardPageState();
+}
+
+class _BusinessCardPageState extends State<BusinessCardPage> {
+  final _cardService = BusinessCardService();
+  final _contactSaveService = ContactSaveService();
+  bool _saving = false;
+
+  Future<void> _addToContact() async {
+    setState(() => _saving = true);
+
+    try {
+      final card = await _cardService.getCardByPublicUsername(
+        widget.publicUsername,
+      );
+
+      if (!mounted) return;
+
+      if (card == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Business card not found')),
+        );
+        return;
+      }
+
+      final saved = await _contactSaveService.saveBusinessCardToPhone(card);
+
+      if (!mounted) return;
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            saved
+                ? 'Contact saved successfully'
+                : 'Contacts permission denied',
+          ),
+        ),
+      );
+    } finally {
+      if (mounted) {
+        setState(() => _saving = false);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Stack(
+        children: [
+          // Your business card UI here.
+
+          Positioned(
+            right: 16,
+            bottom: 16,
+            child: FloatingActionButton(
+              onPressed: _saving ? null : _addToContact,
+              child: _saving
+                  ? const SizedBox(
+                      width: 22,
+                      height: 22,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.person_add),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+```
+
+
+================================================
+10. IF YOU WANT ONLY "ADD TO CONTACT" OPTION
+================================================
+
+In Flutter you control the UI, so just show one button.
+
+Example:
+
+```
+showModalBottomSheet(
+  context: context,
+  builder: (_) {
+    return SafeArea(
+      child: ListTile(
+        leading: const Icon(Icons.person_add),
+        title: const Text('Add to contacts'),
+        onTap: () {
+          Navigator.pop(context);
+          _addToContact();
+        },
+      ),
+    );
+  },
+);
+```
+
+This gives only one option:
+
+```
+Add to contacts
+```
+
+No Call, no Message, no Copy.
+
+
+================================================
+11. OPTIONAL: NATIVE CONTACT CREATOR INSTEAD OF DIRECT SAVE
+================================================
+
+If you do not want Contacts write permission, use native creator.
+This opens the phone's Add Contact page with pre-filled data.
+User taps Save.
+
+Code:
+
+```
+Future<void> openNativeContactCreator(BusinessCardContact card) async {
+  final contact = Contact(
+    name: Name(first: card.fullName),
+    phones: [
+      if (card.phone.isNotEmpty) Phone(number: card.phone),
+      if (card.phone2.isNotEmpty) Phone(number: card.phone2),
+    ],
+    emails: [
+      if (card.email.isNotEmpty) Email(address: card.email),
+    ],
+  );
+
+  await FlutterContacts.native.showCreator(contact: contact);
+}
+```
+
+Use this if:
+- You want less permission risk.
+- You are okay with user tapping Save.
+
+
+================================================
+12. DUPLICATE CONTACT HANDLING
+================================================
+
+Simple version:
+- Save contact directly every time user taps Add to contacts.
+
+Better version:
+- Before saving, search existing contacts by phone number.
+- If found, show:
+  "Contact already exists."
+
+Example idea:
+
+```
+Future<bool> contactAlreadyExists(String phone) async {
+  if (phone.isEmpty) return false;
+
+  final status = await FlutterContacts.permissions.request(
+    PermissionType.readWrite,
+  );
+
+  if (status != PermissionStatus.granted &&
+      status != PermissionStatus.limited) {
+    return false;
+  }
+
+  final contacts = await FlutterContacts.getAll(
+    properties: {ContactProperty.phone},
+    filter: ContactFilter.phone(phone),
+    limit: 1,
+  );
+
+  return contacts.isNotEmpty;
+}
+```
+
+Then before save:
+
+```
+if (await contactAlreadyExists(card.phone)) {
+  // Show already saved message.
+  return;
+}
+
+await saveBusinessCardToPhone(card);
+```
+
+
+================================================
+13. IF DJANGO IS STILL YOUR MAIN BACKEND
+================================================
+
+If Django is still the source of truth, but Flutter app uses Firebase, you have
+two choices:
+
+Option A: Flutter reads from Django API
+- Django exposes:
+  /api/bc/<public_username>/contact/
+- Flutter fetches it using http package.
+- Firebase not required for this specific contact action.
+
+Option B: Django syncs card data to Firebase
+- On create/update business card in Django, write the same data to Firestore.
+- Flutter reads only Firestore.
+
+Recommended for Firebase app:
+Use Option B so the Flutter app stays fast and Firebase-native.
+
+
+================================================
+14. DJANGO TO FIREBASE SYNC IDEA
+================================================
+
+If you want Django to push data into Firestore when card is saved:
+
+1. Install Firebase Admin SDK in Django environment.
+2. Add Firebase service account JSON securely.
+3. When UserProfile saves, write/update:
+
+```
+business_cards/{public_username}
+```
+
+Pseudo code:
+
+```
+def sync_profile_to_firestore(profile):
+    data = {
+        "full_name": profile.full_name or "",
+        "company": profile.company or "",
+        "title": profile.title or "",
+        "phone": str(profile.phone or ""),
+        "phone2": str(profile.phone2 or ""),
+        "company_phone1": profile.company_phone1 or "",
+        "company_phone2": profile.company_phone2 or "",
+        "email": profile.email or "",
+        "company_email": profile.company_email or "",
+        "website": profile.website or "",
+        "address": profile.address or "",
+        "intro": profile.intro or "",
+        "public_username": profile.public_username or "",
+    }
+    firestore_client.collection("business_cards").document(
+        profile.public_username
+    ).set(data, merge=True)
+```
+
+This is only needed if Firebase should store the card data.
+
+
+================================================
+15. SECURITY RULES IDEA
+================================================
+
+If cards are public, allow public read only for business_cards.
+Do not allow public write.
+
+Example idea:
+
+```
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /business_cards/{publicUsername} {
+      allow read: if true;
+      allow write: if request.auth != null;
+    }
+  }
+}
+```
+
+Adjust write rule based on your admin/user system.
+
+
+================================================
+16. FINAL RECOMMENDATION
+================================================
+
+For your current website:
+- Keep Django .vcf flow.
+
+For your Firebase Flutter app:
+- Store/fetch card data from Firestore.
+- Use flutter_contacts package.
+- On Add to contacts click, ask permission and create the contact.
+
+Best user experience:
+- Show only one option: Add to contacts.
+- Save directly after permission.
+- Show success message.
+
+
+================================================
+17. SOURCES CHECKED
+================================================
+
+flutter_contacts package:
+https://pub.dev/packages/flutter_contacts
+
+flutter_contacts API docs:
+https://pub.dev/documentation/flutter_contacts/latest/flutter_contacts/
+
+flutter_contacts Contact class:
+https://pub.dev/documentation/flutter_contacts/latest/models_contact_contact/Contact-class.html
+
+FlutterFire Firestore:
+https://firebase.flutter.dev/docs/firestore/overview/
+
+Firebase Firestore add data:
+https://firebase.google.com/docs/firestore/manage-data/add-data
+

@@ -1,0 +1,331 @@
+VCARD ADD TO CONTACT CHANGES - COPY PASTE GUIDE
+================================================
+
+Project source: D:\ABCD\Workflow ppt
+Date prepared: 2026-05-18
+
+Purpose:
+This file contains only today's Add to Contact / .vcf changes for the public
+business card page:
+
+    path("bc/<str:public_username>/", views.business_card, name="business_card")
+
+When the user clicks the corner user-plus button, a custom Add to Contact tab opens
+with only one option: Add to contacts. That option downloads/opens a .vcf contact
+file. On mobile, this opens the phone contact-save screen with data already filled.
+
+Important:
+A normal website cannot silently save contacts directly into Android/iPhone
+contacts. The correct web flow is:
+
+    Click Add to Contact -> open/download .vcf -> mobile shows Save Contact screen -> user saves
+
+
+================================================
+1. cardapp/views.py
+================================================
+
+Where to add:
+Add this code after your existing business_card view and before view_business_card.
+
+Required imports:
+Your current views.py already has these:
+
+    from django.shortcuts import render, redirect, get_object_or_404
+    from django.http import HttpResponse
+    from .models import *
+
+If your other build does not have HttpResponse imported, add:
+
+    from django.http import HttpResponse
+
+Full code to add:
+
+```
+# VS Changes - vCard helpers for Add to Contact button on public business card.
+def escape_vcard_value(value):
+    value = str(value or "").strip()
+    return (
+        value.replace("\\", "\\\\")
+        .replace(";", "\\;")
+        .replace(",", "\\,")
+        .replace("\r\n", "\\n")
+        .replace("\n", "\\n")
+        .replace("\r", "\\n")
+    )
+
+
+# VS Changes - download contact details as .vcf so mobile opens pre-filled Save Contact screen.
+def download_business_card_vcard(request, public_username):
+    profile = get_object_or_404(UserProfile, public_username=public_username)
+    full_name = escape_vcard_value(profile.full_name)
+    company = escape_vcard_value(profile.company)
+    title = escape_vcard_value(profile.title)
+    address = escape_vcard_value(profile.address)
+    intro = escape_vcard_value(profile.intro)
+    website = escape_vcard_value(profile.website)
+
+    vcard_lines = [
+        "BEGIN:VCARD",
+        "VERSION:3.0",
+        f"FN:{full_name}",
+    ]
+
+    if company:
+        vcard_lines.append(f"ORG:{company}")
+    if title:
+        vcard_lines.append(f"TITLE:{title}")
+    if profile.phone:
+        vcard_lines.append(f"TEL;TYPE=CELL:{escape_vcard_value(profile.phone)}")
+    if profile.phone2:
+        vcard_lines.append(f"TEL;TYPE=CELL:{escape_vcard_value(profile.phone2)}")
+    if profile.company_phone1:
+        vcard_lines.append(f"TEL;TYPE=WORK:{escape_vcard_value(profile.company_phone1)}")
+    if profile.company_phone2:
+        vcard_lines.append(f"TEL;TYPE=WORK:{escape_vcard_value(profile.company_phone2)}")
+    if profile.email:
+        vcard_lines.append(f"EMAIL;TYPE=HOME:{escape_vcard_value(profile.email)}")
+    if profile.company_email:
+        vcard_lines.append(f"EMAIL;TYPE=WORK:{escape_vcard_value(profile.company_email)}")
+    if website:
+        vcard_lines.append(f"URL:{website}")
+    if address:
+        vcard_lines.append(f"ADR;TYPE=WORK:;;{address};;;;")
+    if intro:
+        vcard_lines.append(f"NOTE:{intro}")
+
+    vcard_lines.append("END:VCARD")
+    vcard_data = "\r\n".join(vcard_lines) + "\r\n"
+    filename = f"{profile.public_username or 'business_card'}.vcf"
+
+    response = HttpResponse(vcard_data, content_type="text/vcard; charset=utf-8")
+    response["Content-Disposition"] = f'attachment; filename="{filename}"'
+    return response
+```
+
+Fields used from UserProfile:
+
+    full_name
+    company
+    title
+    phone
+    phone2
+    company_phone1
+    company_phone2
+    email
+    company_email
+    website
+    address
+    intro
+    public_username
+
+If your other build has different field names, update only those profile.field
+references inside download_business_card_vcard.
+
+
+================================================
+2. pixyproject/urls.py
+================================================
+
+Where to add:
+Add the contact.vcf URL just before the existing business_card URL.
+
+Existing public card URL:
+
+```
+path("bc/<str:public_username>/", views.business_card, name="business_card"),
+```
+
+Add this above it:
+
+```
+# VS Changes - vCard download for Add to Contact on public business card.
+path("bc/<str:public_username>/contact.vcf", views.download_business_card_vcard, name="download_business_card_vcard"),
+path("bc/<str:public_username>/", views.business_card, name="business_card"),
+```
+
+Important:
+Keep contact.vcf above the normal bc/<public_username>/ route.
+
+
+================================================
+3. cardapp/templates/nk_businesscard.html
+================================================
+
+Where to change:
+Find this old button:
+
+```
+<div class="savebtn">
+ <a href="tel:{{ profile.phone2 }}"><i class="fa fa-user-plus"></i></a>
+      <!-- <a href="tel:{{ profile.phone2 }}"><i class="fa fa-save"></i></a> -->
+
+ </div>
+```
+
+Replace with this button:
+
+```
+<div class="savebtn">
+ {# VS Changes - Open a custom Add to Contact tab instead of browser tel options. #}
+ <button type="button" onclick="openContactModal()" title="Add to Contact"><i class="fa fa-user-plus"></i></button>
+      <!-- <a href="tel:{{ profile.phone2 }}"><i class="fa fa-save"></i></a> -->
+
+ </div>
+```
+
+Then add this modal after the existing shareModal block:
+
+```
+{# VS Changes - Only Add to Contact option for the public card save button. #}
+<div id="contactModal" class="modal">
+  <div class="modal-content">
+     <span onclick="closeContactModal()" class="modal-close-btn">x</span>
+    <h3>Add to Contact</h3>
+    <hr>
+    <div class="Share-Btn-Container Cont_details">
+     <span>Add to contacts</span>
+     <a href="{% url 'download_business_card_vcard' profile.public_username %}" download="{{ profile.public_username }}.vcf" class="clr-green"><i class="fa fa-user-plus"></i></a>
+    </div>
+  </div>
+</div>
+```
+
+Then add these JavaScript functions near your other modal functions:
+
+```
+// VS Changes - custom Add to Contact modal with only one option.
+function openContactModal() {
+  document.getElementById("contactModal").style.display = "block";
+}
+
+function closeContactModal() {
+  document.getElementById("contactModal").style.display = "none";
+}
+```
+
+What changed:
+- Old href="tel:..." opened browser phone options like Call, Send message, Copy.
+- New button opens our own tab/modal with only Add to contacts.
+- Add to contacts opens/downloads the .vcf file.
+- Mobile contact app will show all available details already filled.
+
+
+================================================
+4. static/css/infistyle.css
+================================================
+
+Where to change:
+Find this CSS:
+
+```
+.savebtn a{
+  color: var(--body-bg);
+}
+```
+
+Replace with:
+
+```
+.savebtn a,
+.savebtn button{
+  color: var(--body-bg);
+}
+/* VS Changes - make Add to Contact button look same as old save link. */
+.savebtn button{
+  background: transparent;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  cursor: pointer;
+}
+```
+
+Why:
+The corner icon is now a button instead of a tel link, so this keeps the UI looking the same.
+
+
+================================================
+5. TESTING
+================================================
+
+After copying, run:
+
+```
+python manage.py check
+```
+
+Manual test:
+1. Open any public card:
+
+    /bc/<public_username>/
+
+2. Click the corner user-plus button.
+3. A tab/modal should open with only:
+
+    Add to contacts
+
+4. Click Add to contacts.
+5. Browser/mobile should open or download:
+
+    /bc/<public_username>/contact.vcf
+
+6. On mobile, contact save screen should show details filled.
+
+Direct URL test:
+
+```
+/bc/<public_username>/contact.vcf
+```
+
+Expected vCard format:
+
+```
+BEGIN:VCARD
+VERSION:3.0
+FN:Person Name
+ORG:Company Name
+TITLE:Title
+TEL;TYPE=CELL:PrimaryNumber
+TEL;TYPE=CELL:SecondaryNumber
+EMAIL;TYPE=HOME:email@example.com
+URL:https://example.com
+ADR;TYPE=WORK:;;Address;;;;
+NOTE:Intro text
+END:VCARD
+```
+
+
+================================================
+6. COMMON ISSUES
+================================================
+
+Issue: NoReverseMatch for download_business_card_vcard
+Fix:
+- Check that pixyproject/urls.py has:
+
+    name="download_business_card_vcard"
+
+- Check that template uses:
+
+    {% url 'download_business_card_vcard' profile.public_username %}
+
+Issue: AttributeError for profile.company_phone1 or another field
+Fix:
+- Your other build may have different UserProfile field names.
+- Update the field names inside download_business_card_vcard.
+
+Issue: Button still opens dialer
+Fix:
+- The template still has href="tel:...".
+- Replace it with the new button and contactModal code.
+
+Issue: Button looks different after changing from anchor to button
+Fix:
+- Add the static/css/infistyle.css change from section 4.
+
+Issue: Contact file downloads but does not open contact app on desktop
+Fix:
+- Desktop usually downloads the file.
+- Test on Android/iPhone for contact-save screen.

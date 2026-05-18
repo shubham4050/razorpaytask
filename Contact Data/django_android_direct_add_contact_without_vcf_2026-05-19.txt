@@ -1,0 +1,613 @@
+DJANGO + ANDROID DIRECT ADD TO CONTACT WITHOUT VCF
+==================================================
+
+Date prepared: 2026-05-19
+Project source context: D:\ABCD\Workflow ppt
+
+Requirement:
+From the public business card page:
+
+    path("bc/<str:public_username>/", views.business_card, name="business_card")
+
+When user clicks Add to Contact, we do not want tel: options and we do not want
+.vcf file flow.
+
+Desired flow:
+
+    Click Add to Contact
+    -> Android app opens
+    -> Android app fetches card data from Django
+    -> Native mobile Add Contact screen opens with data already filled
+    -> User taps Save
+
+Alternative direct-save flow:
+
+    Click Add to Contact
+    -> Android app opens
+    -> Android app fetches card data from Django
+    -> Android asks Contacts permission
+    -> App saves contact directly
+
+
+==================================================
+1. IMPORTANT TRUTH
+==================================================
+
+A normal Django website cannot directly open Android's native Add Contact page
+with full contact data unless an Android app handles that action.
+
+Without .vcf, the website alone cannot send name, company, email, address, website,
+multiple phone numbers, etc. directly into the mobile Contacts app.
+
+So for "without vcf", you need:
+
+    Django website + Android app
+
+The Android app will do the native contact action.
+
+
+==================================================
+2. FINAL ARCHITECTURE
+==================================================
+
+Components:
+
+1. Django public business card page
+   URL:
+       /bc/<public_username>/
+
+2. Django JSON API
+   URL:
+       /api/bc/<public_username>/contact/
+
+3. Android app deep link
+   Example:
+       nexokard://add-contact/<public_username>
+
+4. Android app contact logic
+   Option A:
+       Open Android Add Contact screen with pre-filled data.
+
+   Option B:
+       Save directly to contacts after WRITE_CONTACTS permission.
+
+
+==================================================
+3. USER FLOW
+==================================================
+
+Website button:
+
+    Add to Contact
+
+Click action:
+
+    window.location.href = "nexokard://add-contact/maheshm"
+
+Android:
+
+    App receives public_username = maheshm
+    App calls Django API:
+        https://yourdomain.com/api/bc/maheshm/contact/
+    App receives JSON data.
+    App opens native Add Contact screen with data filled.
+
+
+==================================================
+4. DJANGO API VIEW
+==================================================
+
+File:
+
+    cardapp/views.py
+
+Add this view:
+
+```
+# VS Changes - JSON contact data API for Android direct Add to Contact.
+def business_card_contact_api(request, public_username):
+    profile = get_object_or_404(UserProfile, public_username=public_username)
+    data = {
+        "full_name": profile.full_name or "",
+        "company": profile.company or "",
+        "title": profile.title or "",
+        "phone": str(profile.phone or ""),
+        "phone2": str(profile.phone2 or ""),
+        "company_phone1": profile.company_phone1 or "",
+        "company_phone2": profile.company_phone2 or "",
+        "email": profile.email or "",
+        "company_email": profile.company_email or "",
+        "website": profile.website or "",
+        "address": profile.address or "",
+        "intro": profile.intro or "",
+        "public_username": profile.public_username or "",
+    }
+    return JsonResponse(data)
+```
+
+Required imports:
+
+```
+from django.shortcuts import get_object_or_404
+from django.http import JsonResponse
+from .models import UserProfile
+```
+
+In current project, JsonResponse and get_object_or_404 already exist in views.py.
+
+
+==================================================
+5. DJANGO API URL
+==================================================
+
+File:
+
+    pixyproject/urls.py
+
+Add:
+
+```
+# VS Changes - Android app API for direct Add to Contact.
+path("api/bc/<str:public_username>/contact/", views.business_card_contact_api, name="business_card_contact_api"),
+```
+
+Example API:
+
+```
+https://yourdomain.com/api/bc/maheshm/contact/
+```
+
+Expected JSON:
+
+```
+{
+  "full_name": "Mahesh Motkar",
+  "company": "Pixelstat esolutions development private",
+  "title": "Founder Director",
+  "phone": "9441077173",
+  "phone2": "9110534006",
+  "company_phone1": "8712828575",
+  "company_phone2": "9550799993",
+  "email": "mahesh.motkar@pixelstat.com",
+  "company_email": "Info@pixelstat.com",
+  "website": "https://pixelstat.com",
+  "address": "Plot No 40, Greenpark Avenue...",
+  "intro": "PIXELSTAT is a Design and Development solution...",
+  "public_username": "maheshm"
+}
+```
+
+
+==================================================
+6. WEBSITE BUTTON WITHOUT VCF
+==================================================
+
+File:
+
+    cardapp/templates/nk_businesscard.html
+
+Instead of:
+
+```
+<a href="tel:{{ profile.phone2 }}"><i class="fa fa-user-plus"></i></a>
+```
+
+Use Android deep link:
+
+```
+<div class="savebtn">
+    {# VS Changes - Open Android app Add Contact flow without vCard. #}
+    <a href="nexokard://add-contact/{{ profile.public_username }}" title="Add to Contact">
+        <i class="fa fa-user-plus"></i>
+    </a>
+</div>
+```
+
+Important:
+This works only if the Android app is installed and configured to handle:
+
+    nexokard://add-contact/<public_username>
+
+If app is not installed, browser may show error.
+
+Better web fallback:
+
+```
+<a href="intent://add-contact/{{ profile.public_username }}#Intent;scheme=nexokard;package=com.yourcompany.nexokard;S.browser_fallback_url=https%3A%2F%2Fyourdomain.com%2Fbc%2F{{ profile.public_username }}%2Fcontact.vcf;end">
+    <i class="fa fa-user-plus"></i>
+</a>
+```
+
+Replace:
+
+    com.yourcompany.nexokard
+
+with your real Android package name.
+
+
+==================================================
+7. ANDROID MANIFEST - DEEP LINK
+==================================================
+
+File:
+
+    android/app/src/main/AndroidManifest.xml
+
+Inside your MainActivity activity tag, add intent-filter:
+
+```
+<intent-filter>
+    <action android:name="android.intent.action.VIEW" />
+
+    <category android:name="android.intent.category.DEFAULT" />
+    <category android:name="android.intent.category.BROWSABLE" />
+
+    <data
+        android:scheme="nexokard"
+        android:host="add-contact" />
+</intent-filter>
+```
+
+This lets Android open your app for:
+
+```
+nexokard://add-contact/maheshm
+```
+
+
+==================================================
+8. ANDROID KOTLIN DATA MODEL
+==================================================
+
+```
+data class BusinessCardContact(
+    val fullName: String,
+    val company: String,
+    val title: String,
+    val phone: String,
+    val phone2: String,
+    val companyPhone1: String,
+    val companyPhone2: String,
+    val email: String,
+    val companyEmail: String,
+    val website: String,
+    val address: String,
+    val intro: String,
+    val publicUsername: String
+)
+```
+
+
+==================================================
+9. ANDROID FETCH FROM DJANGO API
+==================================================
+
+Retrofit API:
+
+```
+interface BusinessCardApi {
+    @GET("api/bc/{publicUsername}/contact/")
+    suspend fun getContact(
+        @Path("publicUsername") publicUsername: String
+    ): BusinessCardContact
+}
+```
+
+Retrofit setup example:
+
+```
+val retrofit = Retrofit.Builder()
+    .baseUrl("https://yourdomain.com/")
+    .addConverterFactory(GsonConverterFactory.create())
+    .build()
+
+val api = retrofit.create(BusinessCardApi::class.java)
+```
+
+
+==================================================
+10. ANDROID HANDLE DEEP LINK
+==================================================
+
+In MainActivity:
+
+```
+override fun onCreate(savedInstanceState: Bundle?) {
+    super.onCreate(savedInstanceState)
+    handleIntent(intent)
+}
+
+override fun onNewIntent(intent: Intent) {
+    super.onNewIntent(intent)
+    handleIntent(intent)
+}
+
+private fun handleIntent(intent: Intent?) {
+    val data = intent?.data ?: return
+
+    if (data.scheme == "nexokard" && data.host == "add-contact") {
+        val publicUsername = data.pathSegments.firstOrNull() ?: return
+        openAddContactFlow(publicUsername)
+    }
+}
+```
+
+For:
+
+```
+nexokard://add-contact/maheshm
+```
+
+publicUsername will be:
+
+```
+maheshm
+```
+
+
+==================================================
+11. OPTION A - OPEN MOBILE ADD CONTACT PAGE WITH FILLED DATA
+==================================================
+
+This is the best match for:
+
+    directly mobile contact data shown when click Add to Contact
+
+It opens Android's native Add Contact screen with data filled.
+User taps Save.
+
+No .vcf file.
+
+Code:
+
+```
+private suspend fun openAddContactFlow(publicUsername: String) {
+    val card = api.getContact(publicUsername)
+    openAndroidAddContactScreen(card)
+}
+
+private fun openAndroidAddContactScreen(card: BusinessCardContact) {
+    val intent = Intent(Intent.ACTION_INSERT).apply {
+        type = ContactsContract.RawContacts.CONTENT_TYPE
+
+        putExtra(ContactsContract.Intents.Insert.NAME, card.fullName)
+        putExtra(ContactsContract.Intents.Insert.COMPANY, card.company)
+        putExtra(ContactsContract.Intents.Insert.JOB_TITLE, card.title)
+        putExtra(ContactsContract.Intents.Insert.PHONE, card.phone)
+        putExtra(ContactsContract.Intents.Insert.SECONDARY_PHONE, card.phone2)
+        putExtra(ContactsContract.Intents.Insert.TERTIARY_PHONE, card.companyPhone1)
+        putExtra(ContactsContract.Intents.Insert.EMAIL, card.email)
+        putExtra(ContactsContract.Intents.Insert.SECONDARY_EMAIL, card.companyEmail)
+        putExtra(ContactsContract.Intents.Insert.POSTAL, card.address)
+        putExtra(ContactsContract.Intents.Insert.NOTES, card.intro)
+    }
+
+    startActivity(intent)
+}
+```
+
+Result:
+- Android Contacts app opens.
+- Name, company, phone, email, address, note are filled.
+- User taps Save.
+
+Permission:
+- Usually no WRITE_CONTACTS permission needed because user confirms in system UI.
+
+Limitation:
+- Android's ACTION_INSERT supports common fields.
+- Some fields like website or many phone numbers may depend on contact app support.
+
+
+==================================================
+12. OPTION B - DIRECT SAVE WITHOUT SHOWING CONTACT PAGE
+==================================================
+
+Use this if you want contact saved directly after permission.
+
+AndroidManifest.xml:
+
+```
+<uses-permission android:name="android.permission.WRITE_CONTACTS" />
+```
+
+Runtime permission:
+
+```
+private val requestWriteContacts =
+    registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        if (granted && pendingCard != null) {
+            saveContactDirectly(pendingCard!!)
+        }
+    }
+```
+
+Direct insert:
+
+```
+private fun saveContactDirectly(card: BusinessCardContact) {
+    val ops = ArrayList<ContentProviderOperation>()
+
+    ops.add(
+        ContentProviderOperation.newInsert(ContactsContract.RawContacts.CONTENT_URI)
+            .withValue(ContactsContract.RawContacts.ACCOUNT_TYPE, null)
+            .withValue(ContactsContract.RawContacts.ACCOUNT_NAME, null)
+            .build()
+    )
+
+    ops.add(
+        ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+            .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+            .withValue(
+                ContactsContract.Data.MIMETYPE,
+                ContactsContract.CommonDataKinds.StructuredName.CONTENT_ITEM_TYPE
+            )
+            .withValue(ContactsContract.CommonDataKinds.StructuredName.DISPLAY_NAME, card.fullName)
+            .build()
+    )
+
+    addPhone(ops, card.phone, ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE)
+    addPhone(ops, card.phone2, ContactsContract.CommonDataKinds.Phone.TYPE_MOBILE)
+    addPhone(ops, card.companyPhone1, ContactsContract.CommonDataKinds.Phone.TYPE_WORK)
+    addPhone(ops, card.companyPhone2, ContactsContract.CommonDataKinds.Phone.TYPE_WORK)
+
+    addEmail(ops, card.email, ContactsContract.CommonDataKinds.Email.TYPE_HOME)
+    addEmail(ops, card.companyEmail, ContactsContract.CommonDataKinds.Email.TYPE_WORK)
+
+    if (card.company.isNotBlank() || card.title.isNotBlank()) {
+        ops.add(
+            ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+                .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+                .withValue(
+                    ContactsContract.Data.MIMETYPE,
+                    ContactsContract.CommonDataKinds.Organization.CONTENT_ITEM_TYPE
+                )
+                .withValue(ContactsContract.CommonDataKinds.Organization.COMPANY, card.company)
+                .withValue(ContactsContract.CommonDataKinds.Organization.TITLE, card.title)
+                .withValue(
+                    ContactsContract.CommonDataKinds.Organization.TYPE,
+                    ContactsContract.CommonDataKinds.Organization.TYPE_WORK
+                )
+                .build()
+        )
+    }
+
+    if (card.address.isNotBlank()) {
+        ops.add(
+            ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+                .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+                .withValue(
+                    ContactsContract.Data.MIMETYPE,
+                    ContactsContract.CommonDataKinds.StructuredPostal.CONTENT_ITEM_TYPE
+                )
+                .withValue(ContactsContract.CommonDataKinds.StructuredPostal.FORMATTED_ADDRESS, card.address)
+                .withValue(
+                    ContactsContract.CommonDataKinds.StructuredPostal.TYPE,
+                    ContactsContract.CommonDataKinds.StructuredPostal.TYPE_WORK
+                )
+                .build()
+        )
+    }
+
+    if (card.website.isNotBlank()) {
+        ops.add(
+            ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+                .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+                .withValue(
+                    ContactsContract.Data.MIMETYPE,
+                    ContactsContract.CommonDataKinds.Website.CONTENT_ITEM_TYPE
+                )
+                .withValue(ContactsContract.CommonDataKinds.Website.URL, card.website)
+                .withValue(
+                    ContactsContract.CommonDataKinds.Website.TYPE,
+                    ContactsContract.CommonDataKinds.Website.TYPE_WORK
+                )
+                .build()
+        )
+    }
+
+    if (card.intro.isNotBlank()) {
+        ops.add(
+            ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+                .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+                .withValue(
+                    ContactsContract.Data.MIMETYPE,
+                    ContactsContract.CommonDataKinds.Note.CONTENT_ITEM_TYPE
+                )
+                .withValue(ContactsContract.CommonDataKinds.Note.NOTE, card.intro)
+                .build()
+        )
+    }
+
+    contentResolver.applyBatch(ContactsContract.AUTHORITY, ops)
+}
+```
+
+Helper methods:
+
+```
+private fun addPhone(
+    ops: ArrayList<ContentProviderOperation>,
+    phone: String,
+    type: Int
+) {
+    if (phone.isBlank()) return
+
+    ops.add(
+        ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+            .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+            .withValue(
+                ContactsContract.Data.MIMETYPE,
+                ContactsContract.CommonDataKinds.Phone.CONTENT_ITEM_TYPE
+            )
+            .withValue(ContactsContract.CommonDataKinds.Phone.NUMBER, phone)
+            .withValue(ContactsContract.CommonDataKinds.Phone.TYPE, type)
+            .build()
+    )
+}
+
+private fun addEmail(
+    ops: ArrayList<ContentProviderOperation>,
+    email: String,
+    type: Int
+) {
+    if (email.isBlank()) return
+
+    ops.add(
+        ContentProviderOperation.newInsert(ContactsContract.Data.CONTENT_URI)
+            .withValueBackReference(ContactsContract.Data.RAW_CONTACT_ID, 0)
+            .withValue(
+                ContactsContract.Data.MIMETYPE,
+                ContactsContract.CommonDataKinds.Email.CONTENT_ITEM_TYPE
+            )
+            .withValue(ContactsContract.CommonDataKinds.Email.ADDRESS, email)
+            .withValue(ContactsContract.CommonDataKinds.Email.TYPE, type)
+            .build()
+    )
+}
+```
+
+
+==================================================
+13. WHICH OPTION YOU SHOULD USE
+==================================================
+
+Your sentence:
+
+    "directly mobile contact data shown when we click on add to contact"
+
+Best option:
+
+    Option A - Intent.ACTION_INSERT
+
+Because:
+- No vcf file.
+- Contact page opens directly.
+- Data is filled.
+- User only taps Save.
+- Less permission problem.
+
+Use Option B only if:
+- You want to save silently/directly after permission.
+- You are building installed Android app.
+- You accept Contacts permission/privacy requirements.
+
+
+==================================================
+14. FINAL ANSWER
+==================================================
+
+Without .vcf, the website alone cannot do it.
+
+Correct implementation:
+
+    Website Add to Contact button
+    -> Android app deep link
+    -> Android app fetches Django JSON API
+    -> Android app opens native Add Contact screen with filled data
+
+This gives exactly:
+
+    Name, company, secondary mobile, email, website, address, etc. shown in mobile contact page
+    without user adding data manually.
+
