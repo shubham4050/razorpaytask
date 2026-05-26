@@ -1,0 +1,200 @@
+ADD TO CONTACT CHANGES
+======================
+
+Purpose
+-------
+The save contact button should open the Android mobile native "Add contact" screen from Chrome and pass card data directly into it.
+
+Important Limitation
+--------------------
+This direct contact insert method works for Android mobile Chrome using an Android intent URL.
+It will not work on laptop/desktop browsers because desktop Chrome cannot open Android Contacts.
+It will not work the same way on iPhone browsers. For iPhone/all-device support, a .vcf contact file fallback is normally required.
+
+
+1) Save Button HTML Change
+--------------------------
+File:
+cardapp/templates/nk_businesscard.html
+
+Find the old save button:
+
+<div class="savebtn">
+     <a href="tel:{{ profile.phone2 }}"><i class="fa fa-user-plus"></i></a>
+</div>
+
+Replace with:
+
+<div class="savebtn">
+     <a href="javascript:void(0)" onclick="openAddContact()" aria-label="Save contact"><i class="fa fa-user-plus"></i></a>
+          <!-- <a href="tel:{{ profile.phone2 }}"><i class="fa fa-save"></i></a> -->
+</div>
+
+What changed:
+- Removed the tel: link because it only sends phone number to the dialer.
+- Added onclick="openAddContact()" so JavaScript can pass multiple fields to Android Add Contact.
+
+
+2) Add JavaScript For Android Add Contact Intent
+------------------------------------------------
+File:
+cardapp/templates/nk_businesscard.html
+
+Place this script after:
+
+<script src="{% static 'js/infi.js' %}"></script>
+
+Add this code:
+
+<script>
+function addContactField(intentParts, key, value) {
+    if (value) {
+        intentParts.push(`S.${key}=${encodeURIComponent(value)}`);
+    }
+}
+
+function openAddContact() {
+    const isAndroid = /Android/i.test(navigator.userAgent);
+
+    if (!isAndroid) {
+        return;
+    }
+
+    const contact = {
+        name: "{{ profile.full_name|default:''|escapejs }}",
+        title: "{{ profile.title|default:''|escapejs }}",
+        phone: "{{ profile.phone|default:''|escapejs }}",
+        phone2: "{{ profile.phone2|default:''|escapejs }}",
+        companyPhone1: "{{ profile.company_phone1|default:''|escapejs }}",
+        companyPhone2: "{{ profile.company_phone2|default:''|escapejs }}",
+        email: "{{ profile.email|default:''|escapejs }}",
+        companyEmail: "{{ profile.company_email|default:''|escapejs }}",
+        company: "{{ profile.company|default:''|escapejs }}",
+        website: "{{ profile.website|default:''|escapejs }}",
+        address: "{{ profile.address|default:''|escapejs }}",
+        intro: "{{ profile.intro|default:''|escapejs }}",
+        linkedin: "{{ profile.personal_linked_url|default:''|escapejs }}",
+        instagram: "{{ profile.personal_insta_url|default:''|escapejs }}",
+        facebook: "{{ profile.personal_facebook_url|default:''|escapejs }}",
+        twitter: "{{ profile.personal_twitter_url|default:''|escapejs }}"
+    };
+
+    const notes = [
+        contact.intro,
+        contact.website ? `Website: ${contact.website}` : "",
+        contact.companyEmail ? `Company email: ${contact.companyEmail}` : "",
+        contact.companyPhone1 ? `Company phone: ${contact.companyPhone1}` : "",
+        contact.companyPhone2 ? `Company phone 2: ${contact.companyPhone2}` : "",
+        contact.linkedin ? `LinkedIn: ${contact.linkedin}` : "",
+        contact.instagram ? `Instagram: ${contact.instagram}` : "",
+        contact.facebook ? `Facebook: ${contact.facebook}` : "",
+        contact.twitter ? `Twitter: ${contact.twitter}` : ""
+    ].filter(Boolean).join("\n");
+
+    const intentParts = [
+        "intent://contacts/people/#Intent",
+        "action=android.intent.action.INSERT",
+        "category=android.intent.category.DEFAULT",
+        "type=vnd.android.cursor.dir/contact"
+    ];
+
+    addContactField(intentParts, "name", contact.name);
+    addContactField(intentParts, "phone", contact.phone || contact.phone2);
+    addContactField(intentParts, "secondary_phone", contact.phone && contact.phone2 ? contact.phone2 : contact.companyPhone1);
+    addContactField(intentParts, "tertiary_phone", contact.companyPhone2);
+    addContactField(intentParts, "email", contact.email || contact.companyEmail);
+    addContactField(intentParts, "secondary_email", contact.email && contact.companyEmail ? contact.companyEmail : "");
+    addContactField(intentParts, "company", contact.company);
+    addContactField(intentParts, "job_title", contact.title);
+    addContactField(intentParts, "postal", contact.address);
+    addContactField(intentParts, "notes", notes);
+    intentParts.push("end");
+
+    window.location.assign(intentParts.join(";"));
+}
+</script>
+
+What this code does:
+- Checks the device is Android.
+- Takes the card data from Django template variables.
+- Encodes the values safely for a URL.
+- Builds an Android Contacts insert intent.
+- Opens the phone's native Add Contact screen.
+
+
+3) Fields Passed To Add Contact
+-------------------------------
+These fields are passed directly:
+- full_name -> name
+- phone -> phone
+- phone2 -> secondary_phone when phone exists
+- company_phone1 -> secondary_phone fallback when phone2 is not available
+- company_phone2 -> tertiary_phone
+- email -> email
+- company_email -> secondary_email when personal email exists
+- company -> company
+- title/designation -> job_title
+- address -> postal
+
+These fields are added into notes:
+- intro
+- website
+- company_email
+- company_phone1
+- company_phone2
+- personal LinkedIn URL
+- personal Instagram URL
+- personal Facebook URL
+- personal Twitter URL
+
+
+4) Backend Changes
+------------------
+No backend API route is required for this final version.
+
+Do not add the earlier .vcf endpoint if you want only direct Android Chrome Add Contact behavior.
+
+No changes are needed in:
+- views.py
+- urls.py
+- models.py
+
+
+5) Testing Steps
+----------------
+1. Run:
+python manage.py check
+
+2. Open the public business card URL on Android mobile Chrome:
+Example:
+https://your-domain.com/bc/username/
+
+3. Tap the save contact button.
+
+Expected result:
+The Android Add Contact screen opens with the contact data filled in.
+
+4. Tap Save in the native Contacts screen.
+
+
+6) Notes For Other Build
+------------------------
+Make sure the other build has the same profile variable names:
+- profile.full_name
+- profile.title
+- profile.phone
+- profile.phone2
+- profile.company_phone1
+- profile.company_phone2
+- profile.email
+- profile.company_email
+- profile.company
+- profile.website
+- profile.address
+- profile.intro
+- profile.personal_linked_url
+- profile.personal_insta_url
+- profile.personal_facebook_url
+- profile.personal_twitter_url
+
+If field names are different in the other build, update the JavaScript contact object values only.
